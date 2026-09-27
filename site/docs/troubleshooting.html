@@ -106,9 +106,10 @@ lsof -i :7787
 listening port is the only reliable way to tell which one is serving you — a second instance on
 another port will happily keep polling and triaging with older code.</p>
 <p><strong>The port is taken.</strong> Set <code>TASKUARY_PORT</code> to something else, or stop whatever holds it.</p>
-<p><strong>It started and immediately closed.</strong> Read <code>~/.taskuary/taskuary.log</code>; the last lines before the
-exit are the reason. A corrupt <code>config.toml</code> is the common one — rename it and Taskuary writes a
-fresh default.</p>
+<p><strong>It started and immediately closed.</strong> A corrupt <code>config.toml</code> is the common cause, and it fails
+before Taskuary can write the useful error to <code>taskuary.log</code>. If you started Taskuary from pip,
+read the traceback in the terminal where you ran <code>taskuary</code>. If you started the desktop app, read
+<code>~/.taskuary/desktop-error.log</code>. Rename a corrupt <code>config.toml</code> and Taskuary writes a fresh default.</p>
 <h2 id="a-connection-stopped">A connection stopped<a class="anchor" href="#a-connection-stopped" aria-label="Link to this section">#</a></h2>
 <p>A connector card shows its own last poll and its last error, and that is the first place to look.</p>
 <table>
@@ -201,6 +202,10 @@ altered&quot; is not, and it names the rows.</p>
 <tbody><tr>
 <td>Application log</td>
 <td><code>~/.taskuary/taskuary.log</code></td>
+</tr>
+<tr>
+<td>Desktop startup crash</td>
+<td><code>~/.taskuary/desktop-error.log</code></td>
 </tr>
 <tr>
 <td>The database</td>
