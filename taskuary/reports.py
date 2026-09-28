@@ -1255,20 +1255,6 @@ def report_system(store, cfg: dict, charts: bool = False) -> str:
 NO_BRAIN = '(AI prompt set, but no active AI connector'
 
 
-_DIGITS = re.compile(r'\d+')
-
-
-def same_failure_as_last(store, source_id, error: str) -> bool:
-    """Did the run before this one fail with this same error? Numbers are not the error - a timestamp,
-    a run id, an attempt count - so they are read as one; the words are compared, whole."""
-    try: prev = (store.report_runs(int(source_id), 1) or [None])[0]
-    except Exception: return False
-    if not prev or not prev.get('failed'): return False
-    # the run history keeps the exception bare where the body says "Report error: ..." - one error either way
-    norm = lambda s: _DIGITS.sub('#', ' '.join(re.sub(r'^\s*report error:\s*', '', str(s or ''), flags=re.I).split()))[:300]
-    return bool(prev.get('error')) and norm(prev['error']) == norm(error)
-
-
 def headline_from(summary: str, fallback: str) -> str:
     """What the run CONCLUDED, for the headline - or the row count, when it concluded nothing.
 
@@ -1635,6 +1621,7 @@ def _run_report_source(store, src: dict, cfg: dict, llm=None, trigger: str = 'sc
     if cfg.get('type') == 'zoho_monthly_invoices':
         from .invoice_workflow import run_report
         return run_report(store, src, cfg)
+    failed_model = None
     if cfg.get('type') == 'assistant':
         # not a report row: the assistant posts its own kind of row (ideas with buttons and state),
         # on this report's schedule and with this report's prompt as its instruction - but it is
@@ -1651,6 +1638,9 @@ def _run_report_source(store, src: dict, cfg: dict, llm=None, trigger: str = 'sc
                             # held back is not quiet once it is on the Timeline (2026-09-20)
                             judge=lambda lines, n: decide_for(store, cfg, read_result(title, lines, False, n), report_llm(store, cfg, llm)))
         said = int(out.get('said') or 0)
+        # a model pass that failed is a FAILED run, filed below like any report's (R2)
+        if out.get('failed'): failed_model = out.get('error') or 'the model pass failed'
+    if cfg.get('type') == 'assistant' and not failed_model:
         # a report configured to read nothing posts nothing, and the run history says so in words
         if out.get('reads_nothing'):
             return {'message_id': None, 'subject': f'{title} - read nothing', 'files': 0, **out}
@@ -1658,51 +1648,44 @@ def _run_report_source(store, src: dict, cfg: dict, llm=None, trigger: str = 'sc
         # ONE judgement per run. The post's own decision covers the alert and the send as well; a run
         # with nothing to say asked nobody, and an AI line over nothing is a no - rules still read it
         d = out.get('decided') or decide(cfg, read_result(title, lines, False, said), judge=lambda *_: None if said else {})
-        subject = (f"{title} - {out['held']} line(s) held back: nothing that matters" if out.get('held')
-                   else f'{title} - {said} line(s)')
+        subject = f'{title} - {said} line(s)'
         err = _after(store, src, cfg, d, title, subject, lines, out.get('message_id'))
         return {'message_id': out.get('message_id'), 'subject': subject, 'files': 0, **out, **err}
     try:
+        if failed_model: raise RuntimeError(failed_model)
         head, summary = render_report(store, cfg, llm)
         subject, body = f'{title} — {head}', summary
     except Exception as e:
-        subject, body = f'{title} — FAILED', f'Report error: {str(e)[:500]}'
+        head, subject, body = 'FAILED', f'{title} — FAILED', f'Report error: {str(e)[:500]}'
         logger.warning(f'report {src["Address"]} failed: {e}')
     stamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     # the CHART: line is an instruction to Taskuary about what to draw, not prose for the reader:
     # artifacts reads it off `body`, and what gets filed is the summary without it
     from .artifacts import strip_directive
     failed, text = run_failed(subject), strip_directive(body)
-    d = decide_for(store, cfg, read_result(subject.split('—', 1)[-1].strip(), text, failed), report_llm(store, cfg, llm))
-    # THE SAME FAILURE, AGAIN, IS NOT NEWS (the owner, 2026-09-23): it stays in the run history - as a
-    # failure, so the run after it still compares against it - and reaches nobody
-    if failed and same_failure_as_last(store, src['SourceId'], body): d = dict(d, timeline=False)
-    if not (d['timeline'] or d['work']):
-        # quiet for the owner is not quiet for the recipients or the alert: they have their own lines
-        out = {'message_id': None, 'subject': f'{title} - nothing to report', 'files': 0, 'said': 0,
-               'quiet': True, 'failed': failed, 'error': body if failed else None, 'summary': text[:2000]}
-        return {**out, **_after(store, src, cfg, d, title, subject, text, None)}
-    row = {'TaskId': None, 'ConversationId': f'report:{src["SourceId"]}', 'Channel': 'report', 'SourceName': title,
-           'Subject': subject, 'FromName': title, 'SentAt': stamp, 'BodyText': text, 'SourceLink': cfg.get('link'), 'Status': 'feed'}
-    if d['work']:
-        # the report is a MESSAGE like any other: triage reads it under TRIAGE.md, with the work line's
-        # sentence as its brief (classify_intent's `watch`), and a task is what TRIAGE.md says
-        from .ingest import ingest_message
-        out = ingest_message(store, msg={'external_id': f'report:{src["SourceId"]}:{stamp}', 'channel': 'report',
-                                         'subject': subject, 'body': text, 'from_name': title,
-                                         'conversation_id': f'report:{src["SourceId"]}', 'sent_at': stamp,
-                                         'source_link': cfg.get('link'), 'source_name': title,
-                                         'watch_for': work_brief(cfg) or None}, llm=llm)
-        mid = out.get('message_id') or store.add_message({**row, 'ExternalId': f'report:{src["SourceId"]}:{stamp}:feed'})
-        # TIMELINE NEVER MEANS NEVER (the owner, 2026-09-27): a run triage did not make a task of is put
-        # down at once, so "work only" is a task or nothing
-        if not d['timeline'] and not (store.get_message(mid) or {}).get('TaskId'):
-            from . import funnel
-            funnel.settle(store, f'report:{mid}', 'done', 'report')
-    else:
-        mid = store.add_message({**row, 'ExternalId': f'report:{src["SourceId"]}:{stamp}'})
-        store.add_route(mid, None, 'feed', None, 'the report failed to run' if failed
-                        else 'scheduled report - informational, never a task', [], 'report')
+    # A FAILED RUN IS THE BELL'S (the owner, 2026-09-28): no row on the rail and never a task, a ping or a
+    # send - the run history keeps it and problems.collect reads it from there
+    if failed:
+        return {'message_id': None, 'subject': subject, 'files': 0, 'said': 0, 'failed': True, 'error': body, 'summary': text[:2000]}
+    d = decide_for(store, cfg, read_result(head, text, failed), report_llm(store, cfg, llm))
+    # EVERY RUN THAT WORKED IS TRIAGED (the owner, 2026-09-28, D1): a MESSAGE like any other, read under
+    # TRIAGE.md with the report's brief (classify_intent's `watch`). A task if it needs doing, else a row
+    # under Reports - or, with the Timeline line at no, nothing: a task or nothing
+    from .ingest import ingest_message
+    out = ingest_message(store, msg={'external_id': f'report:{src["SourceId"]}:{stamp}', 'channel': 'report',
+                                     'subject': subject, 'body': text, 'from_name': title,
+                                     'conversation_id': f'report:{src["SourceId"]}', 'sent_at': stamp,
+                                     'source_link': cfg.get('link'), 'source_name': title,
+                                     'watch_for': work_brief(cfg) or None}, llm=llm,
+                         # no brain to triage with is a plain row under Reports, never "triage failed" on every run
+                         file_only=llm is None)
+    mid = out.get('message_id') or store.add_message({'TaskId': None, 'ExternalId': f'report:{src["SourceId"]}:{stamp}:feed',
+                                                      'ConversationId': f'report:{src["SourceId"]}', 'Channel': 'report',
+                                                      'SourceName': title, 'Subject': subject, 'FromName': title, 'SentAt': stamp,
+                                                      'BodyText': text, 'SourceLink': cfg.get('link'), 'Status': 'feed'})
+    if not d['timeline'] and not (store.get_message(mid) or {}).get('TaskId'):
+        from . import funnel
+        funnel.settle(store, f'report:{mid}', 'done', 'report')
     expire_previous_runs(store, src, cfg, mid)
     # the rows are the report: hand back the spreadsheet to open and the chart to look at
     try:
@@ -1756,12 +1739,11 @@ def report_muted(store, title: str, subject: str) -> bool:
 ALERT_WHEN = ('nothing_came_back', 'something_came_back', 'fewer_than', 'more_than', 'contains', 'missing')
 _LEADING_COUNT = re.compile(r'\s*(\d[\d,]*)\b')
 ROUTE = ('always', 'ai', 'rule', 'never')
-LINES = ('timeline', 'work', 'alert', 'send')
-# What a line nobody set means. A report you set up is work you wanted done, so it lands on the
-# Timeline AND on the work rail every run unless you say otherwise (the owner, 2026-09-17: "default
-# should be on timeline/work rail every run"). Delivery has always gone out every run. Only the
-# interruption stays off until it is asked for.
-LINE_DEFAULT = {'timeline': 'always', 'send': 'always', 'work': 'always', 'alert': 'never'}
+LINES = ('timeline', 'alert', 'send')
+# What a line nobody set means. A report you set up lands under Reports every run unless you say
+# otherwise; whether a run is WORK is triage's call on every run, not a line (the owner, 2026-09-28).
+# Delivery has always gone out every run. Only the interruption stays off until it is asked for.
+LINE_DEFAULT = {'timeline': 'always', 'send': 'always', 'alert': 'never'}
 # ...except the Assistant: a voice that checks in every half hour, and "every run" from a voice is
 # noise (the owner, 2026-09-20: "only show up when the assistant has an idea that matters, not always").
 ASSISTANT_WHEN = ('it has an idea that matters: something I would act on or need to know today, '
@@ -1769,25 +1751,17 @@ ASSISTANT_WHEN = ('it has an idea that matters: something I would act on or need
 # What each line is, in the words the judge is given. `alert` is whichever live channel the owner
 # picked, as often email as WhatsApp; what makes it an alert is that it skips Review.
 LINE_SAYS = {'timeline': "post it on the owner's timeline as news to read",
-             'work': "put it on the owner's work rail, as something they have to do",
              'alert': "reach the owner right away, on whichever channel they chose",
              'send': 'send the report out to the people it is addressed to'}
 JUDGE_TOKENS = 60                 # four bare yes/nos
 
 
-def systems_of(cfg: dict) -> list:
-    """The source cards on an Assistant report that are SYSTEMS - a Taskuary card sits in the same
-    list (the owner, 2026-09-20) but is the Assistant's own reading, not a system it monitors."""
-    raw = cfg.get('watch_sources')
-    if isinstance(raw, dict): raw = [raw]
-    return [s for s in (raw if isinstance(raw, list) else []) if isinstance(s, dict) and s.get('type') and s.get('type') != 'taskuary']
-
-
 def default_route(cfg: dict) -> dict:
-    """The card a report gets when nobody has set a line. An Assistant voice asks before it posts; a
-    monitor over connected systems posts its findings - the numbers ARE what matters there."""
-    voice = cfg.get('type') == 'assistant' and not (cfg.get('watch_source_ids') or systems_of(cfg))
-    return {l: ({'how': 'ai', 'when': ASSISTANT_WHEN} if voice and l in ('timeline', 'work') else {'how': LINE_DEFAULT[l]}) for l in LINES}
+    """The card a report gets when nobody has set a line. Every Advisor asks before it posts, the one
+    watching systems too: "every run" had it post "I checked and found nothing" every half hour (D5, the
+    owner 2026-09-28: "default to not show up at all if nothing found")."""
+    ask = cfg.get('type') == 'assistant'
+    return {l: ({'how': 'ai', 'when': ASSISTANT_WHEN} if ask and l == 'timeline' else {'how': LINE_DEFAULT[l]}) for l in LINES}
 
 
 def route_of(cfg: dict, line: str) -> tuple:
@@ -1804,7 +1778,7 @@ def route_of(cfg: dict, line: str) -> tuple:
 
 
 def full_route(cfg: dict) -> dict:
-    """All four lines written down, for the page and for storage: the card shows what runs."""
+    """All three lines written down, for the page and for storage: the card shows what runs."""
     return {l: dict((cfg.get('route') or {}).get(l) or default_route(cfg)[l]) for l in LINES}
 
 
@@ -1816,7 +1790,7 @@ def rule_words(r: dict) -> str:
             'contains': f'it mentions "{text}"', 'missing': f'it never mentions "{text}"'}.get(str(r.get('rule') or '').lower(), '')
 
 
-LINE_NAMES = {'timeline': 'Timeline', 'work': 'work rail', 'alert': 'alert', 'send': 'sent out'}
+LINE_NAMES = {'timeline': 'Timeline', 'alert': 'alert', 'send': 'sent out'}
 
 
 def route_words(cfg: dict) -> str:
@@ -1842,9 +1816,9 @@ def asks_ai(cfg: dict) -> bool: return any(route_of(cfg, l)[0] == 'ai' for l in 
 
 def work_brief(cfg: dict) -> str:
     """The report's standing brief for triage - why it exists and what would count as off
-    (classify_intent's `watch`): the work line's own sentence, or `watch_for`."""
-    how, when = route_of(cfg, 'work')
-    return (when if how == 'ai' else '') or str(cfg.get('watch_for') or '').strip()
+    (classify_intent's `watch`): `watch_for`, or the sentence a card saved with the old work line carries."""
+    old = (cfg.get('route') or {}).get('work') or {}
+    return str(cfg.get('watch_for') or '').strip() or (str(old.get('when') or '').strip() if old.get('how') == 'ai' else '')
 
 
 def from_old_rules(cfg: dict) -> dict:
@@ -1855,8 +1829,10 @@ def from_old_rules(cfg: dict) -> dict:
     words; `triage` switched work on for a run that spoke. `wrong` read a VERDICT line the model was
     told to write - the judge reads the run itself now, against the same sentence.
     """
-    if (r := cfg.get('route')) and any(str((r.get(l) or {}).get('how') or '').strip().lower() in ROUTE for l in LINES):
-        return {**{k: v for k, v in cfg.items() if k not in ('reach', 'triage')}, 'route': full_route(cfg)}
+    if (r := cfg.get('route')) and any(str((r.get(l) or {}).get('how') or '').strip().lower() in ROUTE for l in (*LINES, 'work')):
+        # the old work line's sentence is the triage brief now, so it moves to watch_for rather than drop
+        brief = work_brief(cfg)
+        return {**{k: v for k, v in cfg.items() if k not in ('reach', 'triage')}, 'route': full_route(cfg), **({'watch_for': brief} if brief else {})}
     a, d = dict(cfg.get('alert') or {}), dict(cfg.get('deliver') or {})
     def line(how, cond):
         if how == 'always': return {'how': 'always'}
@@ -1874,9 +1850,8 @@ def from_old_rules(cfg: dict) -> dict:
     send = str(d.get('send') or '').strip().lower()
     route = {'timeline': line(reach, a), 'alert': line(reach, a) if a.get('to') else {'how': 'never'},
              'send': line(send if send in ('always', 'wrong', 'rule') else 'always', d)}
-    route['work'] = dict(route['timeline']) if cfg.get('triage') else {'how': 'never'}
-    # the Assistant's default route was a judge over its own voice, on the Timeline and the work rail
-    if old_default: route |= {k: v for k, v in default_route(cfg).items() if k in ('timeline', 'work')}
+    # the Assistant's default route was a judge over its own voice
+    if old_default: route['timeline'] = default_route(cfg)['timeline']
     out = {k: v for k, v in cfg.items() if k not in ('reach', 'triage')}
     if a: out['alert'] = {k: v for k, v in a.items() if k not in ('when', 'count', 'text')}
     if d: out['deliver'] = {k: v for k, v in d.items() if k not in ('send', 'when', 'count', 'text')}
@@ -1894,10 +1869,18 @@ def as_card(cfg: dict) -> dict:
 
 def run_failed(subject: str) -> bool:
     """Did this run fail? The one test (reports, the rail and the run history all ask it). The
-    headline after the title says FAILED, or one of several sources says `label: FAILED` - a check that
-    could not read everything it was set up to read did not run."""
-    head = str(subject or '').split('—', 1)[-1].strip()
-    return head == 'FAILED' or any(p.strip().endswith(': FAILED') for p in head.split('·'))
+    headline after the title says FAILED, or EVERY one of several sources says `label: FAILED`. One
+    source of three failing is a run that worked without it (D7, the owner 2026-09-28): the good
+    sources' results are kept and sent, and the failed one is named (failed_sources) in the bell."""
+    # the LAST dash: a title may carry one of its own ("AP — daily — FAILED" read as a success, R1)
+    head = str(subject or '').rsplit('—', 1)[-1].strip()
+    return head == 'FAILED' or all(p.strip().endswith(': FAILED') for p in head.split('·'))
+
+
+def failed_sources(subject: str) -> list:
+    """The labels of the sources that failed in a run that otherwise worked."""
+    head = str(subject or '').rsplit('—', 1)[-1]
+    return [p.strip()[:-len(': FAILED')] for p in head.split('·') if p.strip().endswith(': FAILED')]
 
 
 def read_result(head: str, body: str, failed: bool = False, found: int = None) -> dict:
@@ -1925,7 +1908,7 @@ def judge_prompt(cfg: dict) -> str:
                      for l in LINES for h, w in [route_of(cfg, l)] if h == 'ai')
 
 
-_FLAG = re.compile(r'^[ \t>*_\-]*(TIMELINE|WORK|ALERT|SEND)\s*:\s*(yes|no)\b[ \t:.\-—]*(.*)$', re.I | re.M)
+_FLAG = re.compile(r'^[ \t>*_\-]*(TIMELINE|ALERT|SEND)\s*:\s*(yes|no)\b[ \t:.\-—]*(.*)$', re.I | re.M)
 
 
 def judge_state(res: dict) -> str:
@@ -1964,10 +1947,10 @@ def decide(cfg: dict, res: dict, llm=None, judge=None) -> dict:
     that silently stops speaking is worse than one that speaks too often.
 
     A FAILED run reaches the owner in the app and nowhere else (the owner, 2026-09-27: "it's okay if
-    it errors out only in the app"): one row on the Timeline, never a task, never a ping, never a
-    "Report error" sent to the people a report is addressed to.
+    it errors out only in the app"), and only in the bell (2026-09-28): no row, never a task, never a
+    ping, never a "Report error" sent to the people a report is addressed to.
     """
-    if res['failed']: return {'timeline': True, 'work': False, 'alert': False, 'send': False, 'why': 'the report failed to run'}
+    if res['failed']: return {'timeline': False, 'alert': False, 'send': False, 'why': 'the report failed to run'}
     how = {l: route_of(cfg, l) for l in LINES}
     ask = [l for l in LINES if how[l][0] == 'ai']
     said = {}
@@ -2209,34 +2192,24 @@ def _own_data(src: dict) -> bool:
 # job - one held a lock, one did not; one used up the daily cap, one did not; one answered the chat -
 # so the same report could run twice at once, and Run now at 10:00 cancelled the 18:00 checkup.
 _RUNNING, _RUNNING_LOCK = set(), threading.Lock()
-RETRY_MINUTES = 15          # a failed scheduled run is tried again this long after, not on every pass
 
 
 def run_one(store, src: dict, llm=None, trigger: str = 'schedule') -> dict:
     """Run one report now. One run of a report at a time - a second door asking while it runs is
     told so, not queued behind it.
 
-    ONLY A SCHEDULED RUN THAT WORKED MOVES THE CLOCK (LastPolledAt). A manual run is extra: it does
-    not use up "once a day" or push the next slot back (C4). A failed scheduled run is owed: it is
-    tried again RETRY_MINUTES later instead of waiting for tomorrow's slot."""
+    ONLY A SCHEDULED RUN MOVES THE CLOCK (LastPolledAt). A manual run is extra: it does not use up
+    "once a day" or push the next slot back (C4). A failed scheduled run moves it too - it is tried
+    again at its next slot, never in between (the owner, 2026-09-28: every 15 minutes for ever paid
+    for the AI each time), and the failure is told to the owner instead."""
     sid = src['SourceId']
     with _RUNNING_LOCK:
         if sid in _RUNNING: return {'busy': True, 'subject': f"{src.get('Address')} is already running"}
         _RUNNING.add(sid)
-    try:
-        out = run_report_source(store, src, llm, trigger)
-        if trigger == 'schedule' and not out.get('failed'): store.touch_source(sid)
-        return out
+    try: return run_report_source(store, src, llm, trigger)
     finally:
+        if trigger == 'schedule': store.touch_source(sid)
         with _RUNNING_LOCK: _RUNNING.discard(sid)
-
-
-def _failed_lately(store, sid) -> bool:
-    try: last = json.loads(store.get_setting(f'{LAST_RUN}{sid}') or '{}')
-    except ValueError: return False
-    if not last.get('failed') or last.get('trigger', 'schedule') != 'schedule': return False
-    try: return (datetime.now() - datetime.fromisoformat(str(last['at'])[:19])).total_seconds() < RETRY_MINUTES * 60
-    except (KeyError, ValueError): return False
 
 
 def due_reports(store, startup: bool = False) -> list:
@@ -2244,7 +2217,7 @@ def due_reports(store, startup: bool = False) -> list:
     the others (it used to raise out of this list and silence every report and the morning line)."""
     out = []
     for s in store.list_sources():
-        if s['Channel'] != 'report' or _failed_lately(store, s['SourceId']): continue
+        if s['Channel'] != 'report': continue
         try: cfg = json.loads(s.get('ConfigJson') or '{}')
         except ValueError:
             logger.warning(f"report {s.get('Address')} has settings that do not parse - skipped"); continue
@@ -2270,8 +2243,8 @@ def run_due_reports(store, startup: bool = False) -> int:
     except Exception: llm = None
     n = 0
     for src in sorted(due_reports(store, startup), key=lambda s: not _own_data(s)):
-        # a runner that RAISES is a failed run in the history (run_report_source keeps it), retried
-        # RETRY_MINUTES later - never a reason to skip the reports behind it
+        # a runner that RAISES is a failed run in the history (run_report_source keeps it), run again at
+        # its next slot - never a reason to skip the reports behind it
         try: n += not run_one(store, src, llm).get('busy')
         except Exception as e: logger.warning(f"report {src.get('Address')} raised, skipping it and running the rest - {e}")
     return n
