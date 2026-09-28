@@ -7,7 +7,8 @@ import React, { useState } from "react";
 import { Alert, Box, Button, CircularProgress, TextField, Typography } from "@mui/material";
 import api from "./api";
 import ReplyFiles from "./ReplyFiles.jsx";
-import { proposalPresentation, reviewText } from "./reviewProposal.js";
+import { CLOSE_OUT, proposalPresentation, reviewText } from "./reviewProposal.js";
+import { OFFER_HINT, OFFER_LABEL, useCloseoutState } from "./closeoutState.js";
 import { PANEL2, BORDER, DIM, FAINT, INK } from "./theme.jsx";
 import { CcRow, timeAgo, cleanText, splitQuoted } from "./ui.jsx";
 import { deliveryCc, deliveryFiles, deliveryMeta, replyContext } from "./replyDelivery.js";
@@ -52,7 +53,9 @@ export const InvoiceLine = ({ meta }) => (
 );
 
 // `onOpenTask` is optional: on the task page you are already there.
-export default function ReviewDecision({ review: r, onChanged, onOpenTask }) {
+// `closeout` is the task's pending close-out (merge the PR, close the issue): given beside its reply, the two are
+// ONE decision on this card, and the close-out runs first (verdicts.decide's reply_text).
+export default function ReviewDecision({ review: r, closeout, onChanged, onOpenTask }) {
   const [text, setText] = useState(null);           // the owner's edit; null means "the draft as filed"
   const [cc, setCc] = useState(null);               // null means "the CC the draft was filed with"
   const [busy, setBusy] = useState(false);
@@ -65,6 +68,32 @@ export default function ReviewDecision({ review: r, onChanged, onOpenTask }) {
   const value = text ?? reviewText(r);
   const ccNow = cc ?? deliveryCc(r);
   const meta = deliveryMeta(r);
+  const co = closeout && !proposal ? proposalPresentation(closeout) : null;
+  // a reply to a GitHub PR/issue IS a comment on it, so the close-out carries it whatever the replies switch says
+  const carried = !!co && String(r.Channel || "").toLowerCase() === "github";
+  const sendable = r.CanSend !== false || carried;
+  const onTask = !proposal && !!r.TaskId && r.Kind !== "clarification";
+  const thenLine = co ? `${CLOSE_OUT} ${co.then}${sendable ? `, then sends your reply to ${replyContext(r)}` : ""}.`
+    : onTask && !r.Stale && r.CanSend !== false ? `${CLOSE_OUT} sends this to ${replyContext(r)} and closes the task.` : "";
+  const [coFail, setCoFail] = useState(null);       // the close-out itself refused: nothing was sent ({offers} = what fits instead)
+  const [said, setSaid] = useState("");              // what Update branch / Re-run checks just did
+  // THE CARD READS GITHUB FIRST (closeoutState.js): Close out is live only when this repo's rules let it merge now
+  const coRid = closeout?.ReviewId || (proposal?.kind === "closeout" ? r.ReviewId : null);
+  const { gh, reload: reloadGh, act } = useCloseoutState(coRid);
+  const blocked = !!gh && !gh.ok;
+
+  const decideBoth = async (verb) => {
+    setBusy(true); setErr(""); setSendErr(""); setCoFail(null);
+    try {
+      const { data } = await api.post(`/api/reviews/${closeout.ReviewId}/decide`,
+        { verb, final_text: null, note: null, reply_text: verb !== "reject" && sendable ? value : null, cc: sendable ? ccNow : null });
+      // refused before anything happened is not "approved, but it did not send"
+      if (!data.ok && data.send_error) setCoFail({ text: data.send_error, offers: data.offers || [] });
+      else if (data.send_error) setSendErr(data.send_error);
+      reloadGh(); onChanged?.();
+    } catch (e) { setErr(e?.response?.data?.detail || "Decide failed"); }
+    setBusy(false);
+  };
 
   // Approving IS sending, so a send that failed has to say so HERE, the moment you click - it
   // used to return quietly and leave a "NOT SENT" line in the task history for you to find later.
@@ -77,7 +106,9 @@ export default function ReviewDecision({ review: r, onChanged, onOpenTask }) {
           cc: verb === "approve" && !proposal ? ccNow : null });
       const it = interruptOf(data, r.ReviewId);
       if (it) { setInterrupt(it); onChanged?.(); setBusy(false); return; }
-      if (data.send_error) setSendErr(data.send_error);
+      // a close-out GitHub's state refused is "not now", with what fits instead - never "approved, but it did not send"
+      if (data.refused) { setCoFail({ text: data.send_error || "", offers: data.offers || [] }); reloadGh(); }
+      else if (data.send_error) setSendErr(data.send_error);
       onChanged?.();
     } catch (e) { setErr(e?.response?.data?.detail || "Decide failed"); }
     setBusy(false);
@@ -141,7 +172,10 @@ export default function ReviewDecision({ review: r, onChanged, onOpenTask }) {
         const res = resolveInterrupt(interrupt, choice, { [r.ReviewId]: value });
         setText(res.edits[r.ReviewId] ?? value); setCompare(res.compare); setInterrupt(null);
       }} />
-      {r.Reason && (r.DraftText || !/draft/i.test(r.Reason)) && (
+      {/* a close-out says what it closes, whatever an older row's Reason worded it as */}
+      {proposal?.kind === "closeout" ? (
+        <Typography variant="caption" sx={{ color: "#6f8a6e", display: "block", mb: 0.5 }}>{proposal.context}</Typography>
+      ) : r.Reason && (r.DraftText || !/draft/i.test(r.Reason)) && (
         <Typography variant="caption" sx={{ color: "#6f8a6e", display: "block", mb: 0.5 }}>{r.Reason}</Typography>
       )}
       {meta.kind === "zoho_invoice" && <InvoiceLine meta={meta} />}
@@ -158,6 +192,13 @@ export default function ReviewDecision({ review: r, onChanged, onOpenTask }) {
           {proposal?.destination || replyContext(r)}
         </Typography>
       </Box>
+      {co && (
+        <Box sx={{ display: "flex", alignItems: "baseline", gap: 0.8, mb: 0.75, minWidth: 0 }}>
+          <Typography sx={{ color: "#6f8a6e", fontSize: 9.5, fontWeight: 800, letterSpacing: "1.5px", flexShrink: 0 }}>{co.destinationLabel}</Typography>
+          <Typography variant="body2" sx={{ color: INK, fontWeight: 650 }} noWrap>{co.destination}</Typography>
+          <Typography variant="caption" sx={{ color: FAINT }} noWrap>· first, then the reply goes out</Typography>
+        </Box>
+      )}
       {!proposal && <ReplyFiles reviewId={r.ReviewId} files={deliveryFiles(r)}
         text={value} channel={r.Channel} onChanged={onChanged} />}
       {!proposal && <CcRow cc={ccNow} setCc={setCc} channel={r.Channel} />}
@@ -166,14 +207,14 @@ export default function ReviewDecision({ review: r, onChanged, onOpenTask }) {
           shows it; here it lived only in the tooltip of the button that replaced Send, so a drafted
           answer with nowhere to go looked like a card that had simply lost its button. The draft is
           real and worth reading - a GitHub task with replies off is still answered, by hand. */}
-      {!proposal && r.CanSend === false && (
+      {!proposal && !carried && r.CanSend === false && (
         <Typography variant="caption" sx={{ display: "block", color: DIM, mb: 0.5 }}>
           No reply can be sent from here — {r.SendBlock || "this channel cannot be replied to"}. The draft stays for you to use.
         </Typography>
       )}
       <TextField fullWidth multiline minRows={2} maxRows={r.Kind === "action" ? 24 : 8}
         value={value} onChange={(e) => setText(e.target.value)}
-        placeholder={r.DraftText ? "" : proposal ? "Proposal details unavailable" : "No draft yet — hit Draft with AI"}
+        placeholder={proposal?.kind === "closeout" ? proposal.placeholder : r.DraftText ? "" : proposal ? "Proposal details unavailable" : "No draft yet — hit Draft with AI"}
         inputProps={{ style: { fontSize: 12.5, lineHeight: 1.45 } }} />
       {compare?.reviewId === r.ReviewId && (
         <Box sx={{ mt: 0.75, border: "1px solid #d2d6cf", borderRadius: 1.5, px: 1.25, py: 0.75, bgcolor: PANEL2 }}>
@@ -193,11 +234,24 @@ export default function ReviewDecision({ review: r, onChanged, onOpenTask }) {
             asked you to declare something the text already shows. */}
         {/* a channel that cannot carry the reply must SAY so: github with replies
             off gets 'No response required' as THE action, not a send that bounces */}
-        {proposal ? (
-          <Button size="small" variant="contained" disableElevation disabled={busy}
+        {co && !r.Stale ? (
+          /* ONE PRESS FOR THE LAST TWO ACTS (the owner, 2026-09-27: "shouldn't we combine this?"): the merge or
+             close runs first, and the reply above goes out only once it succeeded. A reply this channel cannot
+             carry leaves just the close-out. */
+          <>
+            <Button size="small" variant="contained" disableElevation disabled={busy || blocked || (sendable && !value.trim())}
+              onClick={() => decideBoth("approve")} title={blocked ? gh.reason : thenLine}>
+              {busy ? co.busyLabel : co.approveLabel}</Button>
+            {co.alt && <Button size="small" variant="outlined" disabled={busy || (sendable && !value.trim())}
+              onClick={() => decideBoth(co.alt.verb)} title={`${co.alt.label} ${co.alt.then}${sendable ? ", then sends your reply" : ""}.`}>
+              {co.alt.label}</Button>}
+          </>
+        ) : proposal ? (
+          <Button size="small" variant="contained" disableElevation disabled={busy || (proposal.kind === "closeout" && blocked)}
             onClick={() => decide("approve")}
-            title={proposal.kind === "playbook"
+            title={proposal.kind === "closeout" && blocked ? gh.reason : proposal.kind === "playbook"
               ? "Save this process in Docs → Playbooks; nothing is sent to the sender"
+              : proposal.kind === "closeout" ? `${proposal.approveLabel} - the text above goes with it`
               : "Run the proposed action; nothing is sent to the sender"}>
             {busy ? proposal.busyLabel : proposal.approveLabel}
           </Button>
@@ -223,18 +277,45 @@ export default function ReviewDecision({ review: r, onChanged, onOpenTask }) {
             disabled={busy || !value.trim()}
             onClick={() => decide("approve")}
             title={`Sends this response to ${replyContext(r)}`}>
+            {/* on a task the one word is Close out, as everywhere; a draft with no task behind it is just sent */}
             {busy ? "sending…"
-              : ccNow.length ? `Approve & send, copying ${ccNow.length}`
-              : "Approve & send"}
+              : `${onTask ? CLOSE_OUT : "Approve & send"}${ccNow.length ? `, copying ${ccNow.length}` : ""}`}
           </Button>
         )}
         {/* no "No reply needed" - Mark done on the task is that (the owner, 2026-09-24: "no button should be that") */}
-        <Button size="small" color="error" disabled={busy} onClick={() => decide("reject")}>{proposal?.rejectLabel || "Reject"}</Button>
+        {proposal?.alt && <Button size="small" variant="outlined" disabled={busy} onClick={() => decide(proposal.alt.verb)}
+          title={`${proposal.alt.label} - ${proposal.alt.then}`}>{proposal.alt.label}</Button>}
+        {co && <Button size="small" disabled={busy} onClick={() => decideBoth("reject")}
+          title="Leaves the pull request as it is; the task stays open and on you, the reply unsent">{co.rejectLabel}</Button>}
+        {/* a close-out card is Close out / Decline / Not yet and nothing else (the owner, 2026-09-28: "what does reject
+            reply mean here? don't think we need that") - the reply is edited or redrafted in place, never rejected apart */}
+        {!co && <Button size="small" color="error" disabled={busy} onClick={() => decide("reject")}>{proposal?.rejectLabel || "Reject"}</Button>}
         <Box sx={{ flex: 1 }} />
         {!proposal && meta.kind !== "zoho_invoice" && <Button size="small" disabled={busy} onClick={redraft}>
           {busy ? <CircularProgress size={12} /> : r.Stale ? "Refresh draft" : r.DraftText ? "Redraft" : "Draft with AI"}
         </Button>}
       </Box>
+      {/* what the one word does HERE - the buttons never change, this line does */}
+      {thenLine && <Typography variant="caption" sx={{ color: DIM, display: "block", mt: 0.5 }}>{thenLine}</Typography>}
+      {(coFail || (gh && (blocked || gh.note))) && (() => {
+        const text = coFail ? coFail.text.replace(/ - nothing was merged or sent$/, "") : blocked ? gh.reason : gh.note;
+        const offers = coFail ? coFail.offers : gh.offers;
+        const run = async (o) => {
+          if (o === "anyway") return closeout ? decideBoth("merge_anyway") : decide("merge_anyway");
+          setBusy(true); setErr(""); setSaid(""); setCoFail(null);
+          try { setSaid(await act(o)); } catch (e) { setErr(e?.response?.data?.detail || "GitHub refused it"); }
+          setBusy(false);
+        };
+        return (
+          <Alert severity={coFail || blocked ? "warning" : "info"} sx={{ mt: 1 }} onClose={coFail ? () => setCoFail(null) : undefined}
+            action={offers?.length ? <Box sx={{ display: "flex", gap: 0.5 }}>{offers.map((o) => (
+              <Button key={o} size="small" color="inherit" disabled={busy} title={OFFER_HINT[o]} onClick={() => run(o)}>{OFFER_LABEL[o]}</Button>
+            ))}</Box> : null}>
+            {coFail || blocked ? <b>Not now - nothing is merged or sent. </b> : null}{text}
+          </Alert>
+        );
+      })()}
+      {said && <Alert severity="success" sx={{ mt: 1 }} onClose={() => setSaid("")}>{said}. Close out again once the checks pass.</Alert>}
       {sendErr && (
         <Alert severity="error" sx={{ mt: 1 }} onClose={() => setSendErr("")}>
           <b>Approved, but it did not send.</b> {sendErr}

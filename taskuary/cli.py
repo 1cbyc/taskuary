@@ -4,14 +4,21 @@ import uvicorn
 from . import __version__, config
 
 
+def _port(value):
+    try: return config.port_number(value)
+    except ValueError as e: raise argparse.ArgumentTypeError(str(e)) from None
+
 def public_url(host, port) -> str:
     """0.0.0.0 / :: are bind addresses, not a place a browser can go."""
     shown = '127.0.0.1' if host in ('0.0.0.0', '::') else host
+    if ':' in shown and not shown.startswith('['): shown = f'[{shown}]'
     return f'http://{shown}:{port}'
 
 def _busy(host, port):
     probe = '127.0.0.1' if host in ('0.0.0.0', '::') else host
-    with socket.socket() as s: return s.connect_ex((probe, port)) == 0
+    try:
+        with socket.create_connection((probe.strip('[]'), port), timeout=0.2): return True
+    except OSError: return False
 
 def _is_taskuary(url):
     try:
@@ -47,7 +54,7 @@ def open_when_ready(url: str, wait, open_it=None):
 def main():
     ap = argparse.ArgumentParser(prog='taskuary', description='Your work AI assistant - the local-first agent work hub.')
     ap.add_argument('--host', help='override [server].host (0.0.0.0 to listen on all interfaces)')
-    ap.add_argument('--port', type=int, help='override [server].port')
+    ap.add_argument('--port', type=_port, help='override [server].port')
     ap.add_argument('--no-browser', action='store_true', help="don't open a browser tab when the server starts")
     ap.add_argument('--debug', action='store_true', help='verbose console logging (requests, report runs, errors)')
     ap.add_argument('--version', action='version', version=f'taskuary {__version__}')

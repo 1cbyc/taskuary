@@ -7,7 +7,7 @@ import copy
 import json
 from datetime import datetime, timedelta
 
-from . import processing_all
+from . import processing_all, proposals
 
 # An open task the owner cleared comes back to the work tab once it has been quiet this long. Done
 # used to be the end of it: the task stayed open in the task tab and the work tab never raised it
@@ -72,11 +72,22 @@ def _decided(view, allowed) -> bool:
     return not any((processing_all._stamp(m.get('SentAt')) or max(at)) > max(at) for m in view.get('messages') or [] if not is_ours(m))
 
 
-def _dismissed_idea(view, compact) -> bool:
+def _idea_off(store, view, compact, now) -> bool:
+    """An Advisor idea that is not work on the rail: put down, asleep until a later day, a meeting's prep (the calendar
+    row IS the meeting), one its report's card said is not work, or one a reply you sent has since answered. The old
+    rail kept the last four; the canonical road dropped them (I5, 2026-09-27)."""
     target = compact.get('open_target') or {}
     if target.get('kind') != 'idea': return False
     idea = next((i for i in view.get('ideas') or [] if i['IdeaId'] == target.get('id')), {})
-    return str(idea.get('Status') or 'open') not in ('open', 'snoozed')
+    status = str(idea.get('Status') or 'open')
+    if status == 'snoozed': return str(idea.get('SnoozeUntil') or '9') > now.strftime('%Y-%m-%d %H:%M:%S')
+    if status != 'open' or idea.get('Kind') == 'prep': return True
+    try: action = json.loads(idea.get('ActionJson') or '{}')
+    except (ValueError, TypeError): action = {}
+    if action.get('work') is False: return True
+    from .assistant import sent_reply_for
+    sent = sent_reply_for(store, {'action': action})
+    return bool(sent) and str(sent.get('DecidedAt') or sent.get('CreatedAt') or '') >= str(idea.get('LastSaid') or idea.get('FirstSeen') or '')
 
 
 def _noise_hidden(store) -> bool:
@@ -176,7 +187,7 @@ def card_for(store, item, compact, live_state, now, states=None, quiet=RETURN_MI
                                             or not _arrived_after_close(task, view))
     # DECIDED IS OFF, WHEREVER IT WAS DECIDED (R4, 2026-09-25): a draft sent, rejected or answered "no reply" on the
     # Review page, or an idea dismissed in the chat, stayed on the rail as an unread fyi. Off until THEY write again.
-    if not tid and not review and not closed: closed = _decided(view, allowed) or _dismissed_idea(view, compact)
+    if not tid and not review and not closed: closed = _decided(view, allowed) or _idea_off(store, view, compact, now)
     # ...and the noise the old rail filtered (R5): withdrawn lines, auto-replies, a thread you already answered
     if not tid and not review and not closed and row.get('MessageId') and _noise_hidden(store): closed = _noise(row, view)
     if row.get('MessageId'):
@@ -213,6 +224,23 @@ def card_for(store, item, compact, live_state, now, states=None, quiet=RETURN_MI
             card.update(kind='action' if review.get('Kind') == 'action' else 'review', lane='approve',
                         rid=review['ReviewId'], mid=review.get('MessageId'), draft=bool(review.get('DraftText')),
                         why='A proposed action is waiting for your approval' if review.get('Kind') == 'action' else 'A reply is waiting for your approval')
+            # WHAT THE AGENT DID, between what triggered the task and what you are approving (the owner, 2026-09-28: "the
+            # goal is to see what triggered the task, agent action, and what we are reviewing") - the rail knew it only
+            # inside the `why` sentence; the older walk (funnel.from_feed) always carried it as `summary`
+            if not card.get('summary'): card['summary'] = funnel.agent_found(store, tid)
+            # a REPLY whose task also waits on a merge: its Close out runs both (verdicts.decide), so its card says so
+            if review.get('Kind') != 'action':
+                other = proposals.closeout_pending(store, tid)
+                if other: card.update(closeout=proposals.CLOSEOUT.get(proposals._action(other)), rides=True)
+            # the task's close-out (merge the PR, close the issue): ONE word, Close out - the card's sentence says what it does there
+            closeout = proposals.CLOSEOUT.get(proposals._action(review)) if review.get('Kind') == 'action' else None
+            if closeout:
+                ev = finish_evidence(store, tid)
+                # a reply waiting beside it rides WITH it (verdicts reply_text) - the same one button
+                rides = bool(store._one("SELECT 1 x FROM review WHERE TaskId=? AND Status='pending' AND Kind<>'action'", (tid,)))
+                card.update(closeout=closeout, rides=rides, why=f"{(ev or {}).get('who') or 'The agent'} finished it - Close out {closeout}"
+                                                   + (' and posts your reply' if rides else '')
+                                                   + (f": {ev['summary']}" if (ev or {}).get('summary') else ''))
     # ONE "AGENT FINISHED" (A17, 2026-09-25): a finish that drafted a reply left the task waiting on it, and the owner saw
     # only "reply ready" - never that the agent had finished. The reply is the move, so the card stays the reply to
     # send, and says who finished it.
@@ -263,6 +291,8 @@ def card_for(store, item, compact, live_state, now, states=None, quiet=RETURN_MI
     # ...but the reply is still there behind the agent: closing from its card dismisses it, so the card
     # says so ("Close without sending") rather than losing it quietly
     if review and card.get('kind') == 'agent': card.update(rid=None, draft=False, reply_pending=True)
+    # ...and what an agent already did on it, for the card's middle part (AgentDid) - the reply card had it, the agent's did not
+    if card.get('kind') == 'agent' and not card.get('summary'): card['summary'] = funnel.agent_found(store, tid)
     # ...and an open task nobody closed comes BACK once it has been quiet, so clearing it is a
     # "not now", never a way to lose it. `queued` used to sit in the force-unread clause below, which
     # made a task handed to an agent the one row Done could not shift - the same question answered two

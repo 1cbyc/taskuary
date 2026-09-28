@@ -37,7 +37,7 @@
 <div class="entry">
       <a class="page" href="./">Start here</a>
       <button class="chev" type="button" aria-expanded="false" aria-label="Show Start here's sections"></button>
-      <div class="secs" hidden><a class="sec" href="./#what-taskuary-is">What Taskuary is</a><a class="sec" href="./#install-on-windows">Install on Windows</a><a class="sec" href="./#install-with-python">Install with Python</a><a class="sec" href="./#docker">Docker</a><a class="sec" href="./#your-first-run">Your first run</a><a class="sec" href="./#choosing-the-ai-setup">Choosing the AI setup</a><a class="sec" href="./#where-your-data-lives">Where your data lives</a><a class="sec" href="./#what-leaves-your-machine">What leaves your machine</a><a class="sec" href="./#updating">Updating</a><a class="sec" href="./#next">Next</a></div>
+      <div class="secs" hidden><a class="sec" href="./#what-taskuary-is">What Taskuary is</a><a class="sec" href="./#install-on-windows">Install on Windows</a><a class="sec" href="./#install-with-python">Install with Python</a><a class="sec" href="./#command-line-options">Command-line options</a><a class="sec" href="./#docker">Docker</a><a class="sec" href="./#your-first-run">Your first run</a><a class="sec" href="./#choosing-the-ai-setup">Choosing the AI setup</a><a class="sec" href="./#where-your-data-lives">Where your data lives</a><a class="sec" href="./#what-leaves-your-machine">What leaves your machine</a><a class="sec" href="./#updating">Updating</a><a class="sec" href="./#next">Next</a></div>
     </div>
 <div class="entry">
       <a class="page" href="./how-it-works">How it works</a>
@@ -90,11 +90,11 @@
   <main id="doc">
     <p class="eyebrow">Tasks and agents</p>
     <article>
-<p>A task in Taskuary is three records, not one: the durable job, the agent work done on it, and the
-reply to whoever asked. They start and finish independently, and keeping them apart is what stops
+<p>A task in Taskuary is three records, not one: the durable job, the agent work done on it, and how it
+is closed out - the reply to whoever asked, and on GitHub the merge or the closed issue. They start and finish independently, and keeping them apart is what stops
 the word &quot;done&quot; meaning three different things.</p>
 <h2 id="a-tasks-three-lives">A task&#39;s three lives<a class="anchor" href="#a-tasks-three-lives" aria-label="Link to this section">#</a></h2>
-<p>The task page shows them as one numbered workflow — <strong>1 Task → 2 Agent work → 3 Reply</strong> — and
+<p>The task page shows them as one numbered workflow — <strong>1 Task → 2 Agent work → 3 Close out</strong> — and
 each stage owns exactly one state badge.</p>
 <table>
 <thead>
@@ -118,10 +118,10 @@ each stage owns exactly one state badge.</p>
 <td>Stopping does not mark the task done or send a reply</td>
 </tr>
 <tr>
-<td><strong>Reply</strong></td>
-<td>Communication with the person who asked</td>
-<td>write, generate, edit, approve and send</td>
-<td>Sending it marks the task done — unless an agent is still working or a new message came in</td>
+<td><strong>Close out</strong></td>
+<td>The reply to the person who asked, and the last act where the task lives (merge its pull request, close its issue)</td>
+<td>write, generate, edit; <strong>Close out</strong>, <strong>Decline</strong>, <strong>Not yet</strong></td>
+<td>Sending it marks the task done — unless an agent is still working, a new message came in, or its merge still waits</td>
 </tr>
 </tbody></table>
 <p>While a terminal or an assistant chat is live, the task collapses to a one-line context strip and
@@ -146,7 +146,7 @@ it leaves your work rail, and the &quot;yours to end&quot; mark comes off.</p>
 <td>never</td>
 </tr>
 <tr>
-<td><strong>Send the reply</strong></td>
+<td><strong>Close out</strong> with a reply</td>
 <td>Sends it, then Mark done</td>
 <td>an agent is still working on it, or a new message came in while you were answering — it says why</td>
 </tr>
@@ -172,16 +172,71 @@ it leaves your work rail, and the &quot;yours to end&quot; mark comes off.</p>
 </tr>
 <tr>
 <td><strong>An agent says it is finished</strong> (<code>taskuary --done</code>)</td>
-<td>The session is written up; the task waits for you with the draft if a reply is owed, otherwise it is done</td>
-<td>a reply is owed, or you opened the session yourself</td>
+<td>The session is written up; the task waits for you with its close-out (below) and the draft if a reply is owed, otherwise it is done</td>
+<td>its close-out or a reply waits on you, or you opened the session yourself</td>
 </tr>
 <tr>
-<td><strong>Its pull request is merged or closed</strong></td>
-<td>Same as an agent saying it is finished</td>
-<td>a reply is owed</td>
+<td><strong>Close out</strong> on GitHub, or <strong>Decline</strong></td>
+<td>Merges or closes the pull request, or closes the issue, posts your reply, then Mark done</td>
+<td>never</td>
+</tr>
+<tr>
+<td><strong>The pull request or issue it came from is merged or closed</strong></td>
+<td>Same as an agent saying it is finished, with nothing owed</td>
+<td>never</td>
 </tr>
 </tbody></table>
-<p>A task an agent or a merged pull request closed stays on your work rail until you have read it.
+<p>A task an agent or a merged pull request closed stays on your work rail until you have read it.</p>
+<h3 id="the-close-out-what-finishes-it-where-it-lives">The close-out: what finishes it where it lives<a class="anchor" href="#the-close-out-what-finishes-it-where-it-lives" aria-label="Link to this section">#</a></h3>
+<p>Mail is finished by the reply. A pull request is finished by merging it, and an issue by closing it. Whatever the
+system, the card has the same three buttons - only the line under them says what they do there:</p>
+<table>
+<thead>
+<tr>
+<th>Button</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Close out</strong></td>
+<td>Finishes the task the normal way for its system, sends your reply with it, then Mark done</td>
+</tr>
+<tr>
+<td><strong>Decline</strong></td>
+<td>Closes it without doing it, where the system has that difference - a pull request closed unmerged</td>
+</tr>
+<tr>
+<td><strong>Not yet</strong></td>
+<td>Nothing happens; the task stays open and on you (in the Assistant&#39;s walk this is <strong>Next</strong>)</td>
+</tr>
+</tbody></table>
+<table>
+<thead>
+<tr>
+<th>The task&#39;s work is</th>
+<th>The rail says</th>
+<th>What <strong>Close out</strong> does there</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>A pull request the agent opened, or the one the task came from</td>
+<td>✉️ <strong>ready to close out</strong></td>
+<td>Merges it the way you set on the GitHub connection (a draft is marked ready first), then posts your reply as its comment. The card reads the pull request from GitHub first: when the repository&#39;s rules say it cannot merge yet it says why and offers what fits - <strong>Update branch</strong>, <strong>Re-run checks</strong>, or <strong>Close out anyway</strong> where you allowed it</td>
+</tr>
+<tr>
+<td>An issue the task came from</td>
+<td>✉️ <strong>ready to close out</strong></td>
+<td>Posts your reply as the closing comment and closes the issue</td>
+</tr>
+<tr>
+<td>Mail, chat, anything else</td>
+<td>✉️ <strong>ready to close out</strong></td>
+<td>Sends your reply</td>
+</tr>
+</tbody></table>
+<p>If the act is refused, nothing is sent. Merging or closing the pull request on GitHub yourself counts as answering
+it: the task closes by itself. The buttons are yours, so <strong>Agents may push / deploy</strong> does not have to be on - that
+switch is about what an agent may do. A task an agent finished before this existed gets its card on the next sync.
 A session you started yourself is yours to complete: the agent is told so, and if it says it is
 finished anyway its sentence is filed on the task and the task stays open until you mark it done.</p>
 <p>These never end a task:</p>
@@ -299,7 +354,7 @@ Timeline, the task page, the Board, the assistant&#39;s cards and the phone all 
 <tr>
 <td>✅</td>
 <td><strong>agent finished</strong></td>
-<td>The agent, or its merged pull request, closed the task</td>
+<td>The agent closed the task, or the item it came from was merged or closed</td>
 <td>Read the result</td>
 </tr>
 </tbody></table>
@@ -315,8 +370,8 @@ Timeline, the task page, the Board, the assistant&#39;s cards and the phone all 
 </tr>
 </thead>
 <tbody><tr>
-<td>The agent said it was done, or its pull request merged</td>
-<td>✅ <strong>agent finished</strong> - its reply ready for your yes if one is owed</td>
+<td>The agent said it was done</td>
+<td>its <strong>Close out</strong> card if its work lives on GitHub, then ✅ <strong>agent finished</strong> - ready to close out if a reply is owed</td>
 <td>a new message on it</td>
 </tr>
 <tr>
@@ -438,8 +493,8 @@ triage, and the agent is seeded from it instead of from <code>CODER.md</code>&#3
 <td>saved or stopped — with <strong>Continue session</strong></td>
 </tr>
 <tr>
-<td>a reply is drafted for your yes</td>
-<td>✉️ reply ready</td>
+<td>a reply or a close-out waits for your yes</td>
+<td>✉️ ready to close out</td>
 <td>agent finished, when an agent drafted it</td>
 </tr>
 <tr>
@@ -485,7 +540,7 @@ listed by task number, highest first.</p>
 </tr>
 <tr>
 <td><strong>Your task</strong></td>
-<td>A person&#39;s ask, a reply ready for your yes, an agent waiting on you, an agent waiting to start, an agent stopped or a session saved, a task waiting on somebody else (📤 waiting on them), a check that failed, a task an agent finished</td>
+<td>A person&#39;s ask, a task ready to close out, an agent waiting on you, an agent waiting to start, an agent stopped or a session saved, a task waiting on somebody else (📤 waiting on them), a check that failed, a task an agent finished</td>
 <td>Passed work after 3 hours</td>
 </tr>
 <tr>

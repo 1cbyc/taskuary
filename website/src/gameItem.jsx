@@ -15,6 +15,7 @@ import { RepoPicker } from "./RepoPicker.jsx";
 import { RemindPicker } from "./RemindMe.jsx";
 import { cardFor, laneMeta } from "./funnelPile.js";
 import { afterExecute, proposalOf } from "./proposalCard.js";
+import { CLOSE_OUT, closeoutOf } from "./reviewProposal.js";
 import { needsYou, matchFor, CHIP_MOVE } from "./assistantGame.js";
 
 export const G = { bg: "rgba(20,24,30,.9)", line: "rgba(255,255,255,.1)", ink: "#f3f1ec", dim: "#aeb6bf", faint: "#7c8590",
@@ -106,7 +107,7 @@ function FinalReport({ tid }) {
   return text == null ? null : <><Label>ITS FINAL REPORT</Label><Reading text={text} /></>;
 }
 
-// the draft behind "reply ready": edit it, send it, or tell the assistant how to rewrite it
+// the draft behind "ready to close out": edit it, send it, or tell the assistant how to rewrite it
 function Draft({ item, busy, play }) {
   const [rv, setRv] = useState(null);
   const [text, setText] = useState(null);
@@ -118,6 +119,7 @@ function Draft({ item, busy, play }) {
   if (!rv) return <Typography sx={{ fontSize: 11.5, color: G.faint, mt: 0.6 }}>fetching the draft…</Typography>;
   if (rv.gone) return <Typography sx={{ fontSize: 11.5, color: G.faint, mt: 0.6 }}>Already handled - nothing is waiting here.</Typography>;
   const action = rv.Kind === "action";
+  const co = closeoutOf(rv);
   const parsed = () => { try { const p = JSON.parse(rv.DraftText || ""); return p.text || `${p.action}${p.why ? ` — ${p.why}` : ""}`; } catch { return rv.DraftText || ""; } };
   const value = text ?? (action ? parsed() : rv.DraftText || "");
   const who = rv.FromName || rv.FromEmail || "them";
@@ -133,13 +135,19 @@ function Draft({ item, busy, play }) {
   };
   return (
     <Box onClick={(e) => e.stopPropagation()}>
-      <Label>{action ? "WHAT THE AGENT WANTS TO DO" : `THE DRAFT TO ${who.toUpperCase()} - EDIT, THEN SEND`}</Label>
+      <Label>{co ? "THE AGENT FINISHED - WHAT CLOSES IT" : action ? "WHAT THE AGENT WANTS TO DO" : `THE DRAFT TO ${who.toUpperCase()} - EDIT, THEN SEND`}</Label>
       <Box component="textarea" rows={5} value={value} readOnly={action} onChange={(e) => setText(e.target.value)}
         placeholder="No draft yet - rewrite it below, or type your own" sx={field} />
       {!!(rv.Stale ?? item.stale) && <Typography sx={{ fontSize: 11.5, color: G.gold, mt: 0.4 }}>New messages came in after this draft - rewrite it before sending.</Typography>}
       <Row>
-        <Btn kind="gold" disabled={!!busy || (!action && !value.trim())} onClick={send} title={action ? "Runs what the agent proposed" : `Sends it to ${who}`}>
-          {action ? "▶ Run it · +40" : "📨 Send it · +40"}</Btn>
+        <Btn kind="gold" disabled={!!busy || (!action && !value.trim())} onClick={send} title={co ? `${co.label} - ${co.then}` : action ? "Runs what the agent proposed" : `Sends it to ${who}`}>
+          {co ? `✔ ${co.label} · +40` : action ? "▶ Run it · +40" : item.tid ? `✔ ${CLOSE_OUT} · +40` : "📨 Send it · +40"}</Btn>
+        {/* scored as answering the card - the game has one move for "you decided it" */}
+        {co?.alt && <Btn disabled={!!busy} title={`${co.alt.label} - ${co.alt.then}`} onClick={() => play("approve", item.key, async () => {
+          const { data } = await api.post(`/api/reviews/${item.rid}/decide`, { verb: co.alt.verb, final_text: null, note: null });
+          if (data?.send_error) throw new Error(data.send_error);
+          return data;
+        })}>✖ {co.alt.label}</Btn>}
       </Row>
       {!action && item.mid && <>
         <Box sx={{ display: "flex", gap: 0.5, mt: 0.8 }}>
@@ -181,9 +189,8 @@ export function Moves({ item, covers = [], busy, play, onRepo, given = null, ini
   const pick = async (c, anchor) => {
     // the words that are the page's own actions rather than proposals - exactly as the chat runs them
     if (c.ask) return null;
-    if (c.verb === "defer") { if (item.tid) setRemindAt(anchor || document.body); return null; }
+    if (c.verb === "defer") { if (item.tid || item.idea) setRemindAt(anchor || document.body); return null; }
     if (c.verb === "continue" && item.tid) return play("dispatch", item.key, () => api.post(`/api/tasks/${item.tid}/continue-work`, { note: null }));
-    if (c.verb === "followup") return play("followup", item.key, () => api.post("/api/concierge/act", { key: item.key, verb: "followup" }));
     if ((c.verb === "reply" || c.verb === "redraft") && item.mid)
       return play("draft", null, () => api.post(`/api/messages/${item.mid}/reply`, { draft: true, redraft: c.verb === "redraft", instruction: null }));
     if (c.verb === "prep" && item.event)
@@ -203,7 +210,8 @@ export function Moves({ item, covers = [], busy, play, onRepo, given = null, ini
       <Box sx={{ display: "flex", gap: 0.5, flexWrap: "wrap" }}>
         {shown.map((c) => <Btn key={c.verb} disabled={!!busy || !!prop} onClick={(e) => pick(c, e?.currentTarget)} title={c.hint}>{c.label}</Btn>)}
       </Box>
-      {remindAt && <RemindPicker task={{ TaskId: item.tid, RemindAt: "" }} anchor={remindAt} onClose={() => setRemindAt(null)}
+      {remindAt && <RemindPicker task={{ TaskId: item.tid || `idea-${item.idea}`, RemindAt: "" }} anchor={remindAt} onClose={() => setRemindAt(null)}
+        path={item.kind === "idea" && item.idea ? `/api/assistant/ideas/${item.idea}/snooze` : undefined}
         onDone={(out) => out?.remindAt && play("later", item.key, async () => out)} />}
       {prop && (
         <Box sx={{ mt: 0.8, p: 1, borderRadius: "9px", border: `1px dashed ${G.gold}`, bgcolor: "rgba(240,192,90,.07)" }}>

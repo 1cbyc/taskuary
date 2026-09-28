@@ -68,8 +68,8 @@ def close_issue(tok, repo, number, comment=None):
 
 def open_pr(tok, repo, head, base, title, body, draft=True):
     """A DRAFT pull request by default: a branch pushed for review is not a merge request
-    yet, and Taskuary never merges. 422 with 'already exists' comes back as the existing PR
-    instead of an error - opening twice is a retry, not a mistake."""
+    yet - it merges only on the owner's yes (merge_pr). 422 with 'already exists' comes back
+    as the existing PR instead of an error - opening twice is a retry, not a mistake."""
     r = requests.post(f'{GH}/repos/{repo}/pulls', headers=_h(tok), timeout=20,
                       json={'title': title, 'body': body, 'head': head, 'base': base, 'draft': draft})
     if r.status_code == 422 and 'already exist' in r.text:
@@ -94,9 +94,77 @@ def pr(tok, repo, number):
     r = requests.get(f'{GH}/repos/{repo}/pulls/{number}', headers=_h(tok), timeout=20)
     r.raise_for_status()
     j = r.json()
+    # mergeable_state is GitHub's verdict on THIS repo's rules for THIS pull request - clean, unstable (a check it does not
+    # require is red), blocked (a required check, review or rule), behind (must be up to date), dirty (conflicts), draft,
+    # or unknown while GitHub is still computing it. The close-out reads it instead of guessing at each repo's protection.
     return {'number': j['number'], 'url': j['html_url'], 'head': j['head']['ref'],
             'sha': j['head']['sha'], 'state': j['state'], 'draft': j.get('draft'),
-            'merged': j.get('merged'), 'mergeable': j.get('mergeable')}
+            'merged': j.get('merged'), 'mergeable': j.get('mergeable'), 'node_id': j.get('node_id'),
+            'mergeable_state': j.get('mergeable_state') or 'unknown', 'base': (j.get('base') or {}).get('ref'),
+            'maintainer_can_modify': bool(j.get('maintainer_can_modify')),
+            'same_repo': ((j.get('head') or {}).get('repo') or {}).get('full_name') == ((j.get('base') or {}).get('repo') or {}).get('full_name')}
+
+
+def repo_info(tok, repo) -> dict:
+    """What this repository allows and what the token may do in it: the merge methods its settings permit, and the
+    token's own role (`permissions`: admin / maintain / push / triage / pull)."""
+    r = requests.get(f'{GH}/repos/{repo}', headers=_h(tok), timeout=20)
+    r.raise_for_status()
+    j = r.json()
+    return {'methods': [m for m, k in (('squash', 'allow_squash_merge'), ('merge', 'allow_merge_commit'), ('rebase', 'allow_rebase_merge'))
+                        if j.get(k, True)],
+            'permissions': j.get('permissions') or {}, 'default_branch': j.get('default_branch')}
+
+
+def update_branch(tok, repo, number, expected_sha=None) -> str:
+    """GitHub's own "Update branch": merges the base into the pull request, so its checks run fresh against today's base."""
+    r = requests.put(f'{GH}/repos/{repo}/pulls/{number}/update-branch', headers=_h(tok), timeout=30,
+                     json={'expected_head_sha': expected_sha} if expected_sha else {})
+    if r.status_code in (403, 422):
+        try: why = r.json().get('message')
+        except ValueError: why = ''
+        raise RuntimeError(f"GitHub would not update #{number}: {why or r.text[:200]}")
+    r.raise_for_status()
+    return (r.json() or {}).get('message') or 'Updating the branch'
+
+
+def rerun_failed(tok, repo, sha) -> int:
+    """Re-run the failed jobs of every Actions run on this commit; the number of runs asked. Checks from other CI
+    systems cannot be re-run from here."""
+    r = requests.get(f'{GH}/repos/{repo}/actions/runs', headers=_h(tok), params={'head_sha': sha, 'per_page': 50}, timeout=20)
+    r.raise_for_status()
+    n = 0
+    for run in r.json().get('workflow_runs') or []:
+        if run.get('conclusion') not in ('failure', 'timed_out', 'cancelled'): continue
+        x = requests.post(f"{GH}/repos/{repo}/actions/runs/{run['id']}/rerun-failed-jobs", headers=_h(tok), timeout=20)
+        if x.status_code == 403: raise RuntimeError("the token may not re-run checks - it needs Actions: write")
+        x.raise_for_status(); n += 1
+    return n
+
+
+def merge_pr(tok, repo, number, sha, title=None, message=None, method='squash', p=None) -> str:
+    """Merge a pull request - only ever from the owner's approved close-out (proposals 'merge_pr').
+    GitHub refuses to merge a draft, so it is marked ready first. `sha` pins the head that was
+    reviewed: a commit pushed after the owner looked is a 409, never a silent merge."""
+    p = p or pr(tok, repo, number)
+    if p.get('draft'):
+        q = 'mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{isDraft}}}'
+        r = requests.post(f'{GH}/graphql', headers=_h(tok), json={'query': q, 'variables': {'id': p['node_id']}}, timeout=20)
+        r.raise_for_status()
+        if r.json().get('errors'): raise RuntimeError(f"GitHub would not mark #{number} ready: {r.json()['errors'][0].get('message')}")
+    body = {'merge_method': method, 'sha': sha, **({'commit_title': title} if title else {}), **({'commit_message': message} if message else {})}
+    r = requests.put(f'{GH}/repos/{repo}/pulls/{number}/merge', headers=_h(tok), json=body, timeout=30)
+    if r.status_code in (405, 409, 422):
+        try: why = r.json().get('message')
+        except ValueError: why = ''
+        raise RuntimeError(f"GitHub refused to merge #{number}: {why or r.text[:200]}")
+    r.raise_for_status()
+    return r.json().get('sha') or ''
+
+
+def close_pr(tok, repo, number):
+    """Close a pull request WITHOUT merging it - the close-out's other answer (proposals.close_pr)."""
+    requests.patch(f'{GH}/repos/{repo}/pulls/{number}', headers=_h(tok), json={'state': 'closed'}, timeout=20).raise_for_status()
 
 
 def closed_by(tok, repo, number) -> str:

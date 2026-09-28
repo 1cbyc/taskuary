@@ -14,9 +14,9 @@ class ReportTriageTests(unittest.TestCase):
         sid = s.save_source({'Channel': 'report', 'Address': cfg['title'], 'ConfigJson': json.dumps(cfg), 'Active': 1}, 't')
         return next(x for x in s.list_sources(active_only=False) if x['SourceId'] == sid)
 
-    def test_off_by_default_a_report_is_informational(self):
+    def test_work_never_keeps_a_report_informational(self):
         s = MemoryStore()
-        src = self._src(s, {'type': 'agent', 'title': 'Trends'})
+        src = self._src(s, {'type': 'agent', 'title': 'Trends', 'route': {'work': {'how': 'never'}}})
         with mock.patch.object(reports, 'render_report', return_value=('coder ran a prompt', '# Trends\nbuild a doc about X')):
             reports.run_report_source(s, src, llm=TASK_LLM)
         m = s._rows("SELECT * FROM message WHERE Channel='report'")[0]
@@ -89,7 +89,7 @@ class ReportTriageTests(unittest.TestCase):
             reports.run_report_source(s, src, llm=TASK_LLM)
         m = s._rows("SELECT * FROM message WHERE Channel='report'")[0]
         self.assertEqual((m['Status'], m['TaskId']), ('feed', None)); self.assertIn('FAILED', m['Subject'])
-        self.assertIn('not triaged', s._rows('SELECT * FROM route ORDER BY RouteId DESC')[0]['Reason'])
+        self.assertIn('failed to run', s._rows('SELECT * FROM route ORDER BY RouteId DESC')[0]['Reason'])
 
 
 class BoardDoneTests(unittest.TestCase):

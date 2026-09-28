@@ -455,7 +455,7 @@ class ResponseTests(unittest.TestCase):
     def test_approve_is_confirmed_then_sends_the_drafted_reply_and_the_task_settles(self):
         s, tid, rid, item = self._drafted()
         p = decide(s, 'approve', 'approve', key=item['key'])['proposal']
-        self.assertEqual((p['kind'], p['target'], p['label']), ('review.approve', rid, 'Send the reply'))
+        self.assertEqual((p['kind'], p['target'], p['label']), ('review.approve', rid, 'Close out'))       # one word, every system
         self.assertEqual(s.get_review(rid)['Status'], 'pending')       # nothing sent on the words
         sent = {'ok': True, 'to': 'craig@vendor.com', 'subject': 'RE:', 'provider': 'test', 'channel': 'email'}
         with mock.patch('taskuary.outbound.reply_to_message', return_value=sent):
@@ -554,7 +554,7 @@ class ResponseTests(unittest.TestCase):
         self.assertEqual(item['source_id'], sid)
         p = decide(s, 'run it again', 'rerun', key=item['key'])['proposal']
         self.assertEqual((p['kind'], p['target'], p['label']), ('report.rerun', sid, 'Run the report again'))
-        with mock.patch.object(server, 'run_report_source') as ran:    # queued on a thread, so wait for it
+        with mock.patch('taskuary.reports.run_report_source') as ran:    # queued on a thread, so wait for it
             r = run(s, p)
             for _ in range(50):
                 if ran.called: break
@@ -1458,7 +1458,7 @@ class ApiActionsTests(unittest.TestCase):
         sid = s.save_source({'Channel': 'report', 'Address': 'Nightly export', 'Owner': 'o', 'Active': 1,
                              'ConfigJson': json.dumps({'type': 'agent', 'title': 'Nightly export'})}, 'o')
         c = self.client(s)
-        with mock.patch.object(server, 'run_report_source') as run:      # queued on a thread, so wait for it
+        with mock.patch('taskuary.reports.run_report_source') as run:      # queued on a thread, so wait for it
             r = c.post(f'/api/reports/{sid}/rerun')
             for _ in range(50):
                 if run.called: break

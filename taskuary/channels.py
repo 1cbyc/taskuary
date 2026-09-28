@@ -1095,8 +1095,14 @@ def close_upstream_ended(store, tid: int, said: str, final: str, actor: str = 'r
     rides in as the LAST MESSAGE, so the task says what ended it in the place every other ending
     is recorded. A task that never had a session has nothing to wrap ('nothing to wrap up') -
     that refusal is expected, and must not leave the dead task sitting in the work list."""
-    from . import coder
-    store.add_comment(tid, 'router', 'agent', said)
+    from . import coder, proposals
+    # said once: a task kept open below for its unsent reply meets this ending again on a later poll
+    if not any(c.get('Body') == said for c in store.list_comments(tid)): store.add_comment(tid, 'router', 'agent', said)
+    # a close-out waiting on the owner (close the issue, merge) is answered by the upstream ending itself
+    rv = proposals.closeout_pending(store, tid)
+    if rv: store.decide_review(rv['ReviewId'], 'no_reply', None, actor, 'the item ended upstream')
+    # ...and a merged or closed item is FINISHED, a thank-you drafted beside it included: it closes, and closing retires
+    # the unsent draft (the owner, 2026-09-28: "if they were merged in, they should just close")
     try:
         coder.wrap(store, tid, close=True, actor=actor, final_message=final, no_reply=True)   # a merged PR owes nobody a reply (A21)
     except ValueError as e:
@@ -1105,6 +1111,25 @@ def close_upstream_ended(store, tid: int, said: str, final: str, actor: str = 'r
     except Exception as e:
         logger.warning(f'TQ-{tid:04d}: the ending failed ({e}) - closing it plainly')
         store.update_task(tid, {'Status': 'done'}, actor)
+
+
+ENDED_SAID = 'so there is nothing left to do here.'
+
+
+def heal_upstream_ended(store) -> list:
+    """Close the tasks an ended item already said were over but that stayed open. Your own merge used to hold its task
+    for an unsent thank-you, and the poll reads only items changed since it last ran - so a PR merged before the fix was
+    never read again and its task sat at "ready to close out" for good (the owner, 2026-09-28). The sync's own comment
+    on the task is the evidence; nothing is asked of GitHub. Returns the tasks it closed."""
+    closed = []
+    for t in store.list_tasks(active_only=True):
+        said = next((c['Body'] for c in reversed(store.list_comments(t['TaskId']))
+                     if c.get('Actor') == 'router' and str(c.get('Body') or '').endswith(ENDED_SAID)), None)
+        if not said: continue
+        close_upstream_ended(store, t['TaskId'], said, said, 'owner' if said.startswith('You ') else 'router')
+        closed.append(t['TaskId'])
+    if closed: logger.info(f"github: closed {len(closed)} task(s) whose item had already ended: {closed}")
+    return closed
 
 
 def _gh_ended(store, item: dict, base: str, repo: str, tok: str = None) -> int:
@@ -1119,7 +1144,8 @@ def _gh_ended(store, item: dict, base: str, repo: str, tok: str = None) -> int:
     if not tid: return 0
     t = store.get_task(tid) or {}
     if t.get('Status') in ('done', 'dropped'): return 0
-    what = 'merged' if item.get('merged_at') else 'closed'
+    # the issues list carries a PR's merge under pull_request.merged_at, not at the top: every merge read as 'closed'
+    what = 'merged' if item.get('merged_at') or (item.get('pull_request') or {}).get('merged_at') else 'closed'
     kind = 'pull request' if 'pull_request' in item else 'issue'
     said = (f"The {kind} this task came from was {what} on GitHub "
             f"({repo}#{item['number']}), so there is nothing left to do here.")

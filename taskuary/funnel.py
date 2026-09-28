@@ -308,6 +308,13 @@ def from_feed(store, rows: list, *, canonical=False) -> list:
                              stale=stale,
                              sig=hashlib.sha1(str(rv.get('DraftText') or '').encode()).hexdigest()[:10],   # the draft's fingerprint: a rewrite is news
                              **base))
+            from . import proposals
+            co = proposals.CLOSEOUT.get(proposals._action(rv)) if action else None
+            if not action and r.get('TaskId'):         # a reply whose task also waits on its merge: Close out runs both
+                other = proposals.closeout_pending(store, r['TaskId'])
+                if other: out[-1].update(closeout=proposals.CLOSEOUT.get(proposals._action(other)), rides=True)
+            if co: out[-1].update(closeout=co, why=f'the agent finished - Close out {co}',
+                                  rides=bool(store._one("SELECT 1 x FROM review WHERE TaskId=? AND Status='pending' AND Kind<>'action'", (r.get('TaskId'),))))
             if group: threads[group] = out[-1]                 # the draft speaks for its task/thread
             continue
         if r.get('AgentWaiting') and r.get('TaskId'):
@@ -495,7 +502,12 @@ def not_started_why(store, tid) -> str:
     for r in reversed(store.message_routes(msg.get('MessageId')) or []) if msg.get('MessageId') else []:
         reason = str(r.get('Reason') or '')
         if AUTO_OFF in reason:
-            return 'Triage did not start it: ' + reason.split(AUTO_OFF, 1)[1].strip().rstrip('.') + '.' + old
+            said = reason.split(AUTO_OFF, 1)[1].strip().rstrip('.')
+            # the old words read as a queue that clears by itself; a GitHub hold now says who wrote it and whom the repo trusts
+            if said.startswith('github items queue') and str(msg.get('Channel') or '') == 'github':
+                from .ingest import gh_hold_why
+                said = gh_hold_why(store, {'source_name': msg.get('SourceName'), 'body': msg.get('BodyText')})
+            return 'Triage did not start it: ' + said + '.' + old
     if not auto_code_enabled(store) and (t.get('Kind') or '') == 'coding':
         return f'Auto-start is off, so {who} waits for you to press Start.' + old
     return f'It was handed to {who} and nothing has started it.' + old
@@ -712,15 +724,12 @@ def from_forgotten(store, used_mids: set, used_tids: set, used_cids: set = froze
         # slipped stuff should be fyi unless triage turns it into task"). It used to open as 'slipped'
         # - or 'report' for a systems section - so an idea whose verdict failed, or that was still
         # waiting for an AI connector to reach one, was shown as work nobody had called work.
-        lane = 'fyi'
-        # the shared verdict decides the lane (PW-200): fyi is fyi, an ask is an ask, a failed verdict says so;
-        # an idea whose work was opened leaves this lane for the task row it opened (used_tids below)
-        tri = a.get('triage') or {}
+        # the shared verdict decides the lane (PW-200), by the one rule the canonical rail uses too
+        from .processing_all import idea_lane
+        lane, tri = idea_lane(i), a.get('triage') or {}
         why = a.get('why') or 'the assistant raised this'
         if tri.get('error'): why = f"triage failed ({tri['error']}) - the next check retries; {why}"
         elif tri.get('pending'): why = f'awaiting triage (no AI connector); {why}'
-        elif tri.get('intent') == 'fyi': lane = 'fyi'
-        elif tri.get('intent') in ('task', 'reply_only'): lane = 'asked'
         m = (store.get_message(a['mid']) or {}) if a.get('mid') else {}
         cid = m.get('ConversationId')
         if cid and (cid in used_cids or cid in seen_cids): continue     # one line per conversation
@@ -1384,6 +1393,16 @@ def item_for_key(store, key: str) -> dict | None:
 
 VERBS = ('surfaced', 'done', 'later', 'skip', 'ack')
 
+
+def _idea_done(store, key: str, by: str):
+    """Done on an Advisor idea's own row puts the IDEA down, not only the row: the rail wrote its own state and
+    nothing else, so the Advisor went on reading the idea as open (I4, 2026-09-27). Not ours is a dismiss before this."""
+    m = re.fullmatch(r'idea:(\d+)', str(key or ''))
+    try: ids = [int(m.group(1))] if m else store.processing_item_ideas(key) if str(key).startswith('processing:') else []
+    except Exception as e: logger.debug(f'the idea behind {key} was not read: {e}'); ids = []
+    for i in ids:
+        if (store.get_idea(i) or {}).get('Status') in ('open', 'snoozed'): store.set_idea_status(i, 'done', by)
+
 def settle(store, key: str, verb: str, by: str = 'owner', hours: float = None, note: str = None, *, expected_context=None, read: bool = False) -> dict:
     """The owner's word on one item. done: gone for good. later: back in `hours` (LATER_HOURS by
     default). skip: back tomorrow morning. surfaced: shown in this walk - and, with `read`, READ: once
@@ -1419,6 +1438,7 @@ def settle(store, key: str, verb: str, by: str = 'owner', hours: float = None, n
         processing_all.wait_settled(store)
         store.reconcile_processing_membership()
         store.set_funnel_state(key, verb, by, until, note, **kw)
+    if verb == 'done': _idea_done(store, key, by)
     invalidate()
     # BULK PROCESSING: an item leaving the head is what pays for the next one to be judged - triage
     # is spent as the owner makes room, not 300 times on arrival (rank.py). `later` counts: it holds

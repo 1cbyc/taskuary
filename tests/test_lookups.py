@@ -73,6 +73,39 @@ class LookupTests(unittest.TestCase):
         self.assertIn('Nothing in the help', read(s, 'docs.search', query='zzzqqq'))
 
 
+class CutTests(unittest.TestCase):
+    def test_below_600_collapses_whitespace_and_newlines(self):
+        text = "first line\nsecond   line\tthird line"
+
+        self.assertEqual(
+            lookups._cut(text, 599),
+            "first line second line third line",
+        )
+
+    def test_at_600_keeps_own_lines(self):
+        text = "first line\nsecond   line\tthird line"
+
+        self.assertEqual(lookups._cut(text, 600), text)
+
+    def test_above_600_keeps_own_lines(self):
+        text = "first line\nsecond   line\tthird line"
+
+        self.assertEqual(lookups._cut(text, 601), text)
+
+    def test_exactly_n_characters_is_not_cut(self):
+        text = "abcdefghij"
+
+        self.assertEqual(lookups._cut(text, 10), text)
+
+    def test_longer_text_ends_with_marker(self):
+        text = "abcdefghijk"
+
+        self.assertEqual(lookups._cut(text, 10), "abcdefghij […]")
+
+    def test_none_gives_empty_string(self):
+        self.assertEqual(lookups._cut(None, 100), "")
+
+
 class AppAtWorkTests(unittest.TestCase):
     """What the agents are doing, what waits on a yes, the calendar, what happened, what failed."""
 
@@ -114,6 +147,13 @@ class AppAtWorkTests(unittest.TestCase):
         self.assertEqual(agenda.call_args.kwargs['days'], 1)
         s.set_setting('calendar_enabled', '0', 't')
         self.assertIn('switched off', read(s, 'calendar.read'))
+
+    def test_lookup_arguments_do_not_drop_the_assistant_turn(self):
+        s = world()
+        for kind, days in [('activity.list', 'week'), ('activity.list', 1e9), ('activity.list', -5),
+                           ('errors.list', 'week'), ('errors.list', 1e9), ('errors.list', -5)]:
+            self.assertIsInstance(read(s, kind, days=days), str)
+        self.assertIsInstance(read(s, 'calendar.read', **{'from': '2026-02-30'}), str)
 
     def test_activity_list_keeps_the_owner_and_the_agents_apart(self):
         s = world()

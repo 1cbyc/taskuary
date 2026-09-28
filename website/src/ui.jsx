@@ -291,7 +291,7 @@ export const ProofCard = ({ taskId, onOpenTask }) => {
           <>
             <Box component="span" onClick={() => !busy && act("land")}
               title={p.flow === "direct" ? "pushes the commits already in the checkout straight onto the default branch"
-                : "opens a DRAFT pull request from this task's branch — never merges"}
+                : "opens a DRAFT pull request from this task's branch — it merges only when you approve the task's close-out"}
               sx={{ fontSize: 11, fontWeight: 700, color: busy ? FAINT : "#55697a", cursor: "pointer" }}>
               {busy === "land" ? "landing…" : p.flow === "direct" ? "push straight to the branch" : "open a draft PR"}
             </Box>
@@ -1082,7 +1082,7 @@ const LC = {
 const lifecycleColor = (kind, phase) => {
   const value = String(phase || "");
   if (value === AGENT.waiting) return LC.needsYou;        // an agent blocked on you, and only that
-  if (value === "reply ready" || value === "approval needed" || value === "ready") return LC.you;
+  if (value === "ready to close out" || value === "approval needed" || value === "ready") return LC.you;
   if (value === AGENT.working || value === "in progress") return LC.working;
   if (value === "done" || value === "sent" || value === AGENT.saved || value === AGENT.finished) return LC.done;
   if (kind === "reply") return LC.reply;
@@ -1114,7 +1114,10 @@ export const timeAgo = (s) => {
 // should be removed from everywhere"). The SAME rule as triage._BANNER - test_banner_is_one_rule holds
 // the two together - and it only changes what is shown; the mail as stored stays whole.
 export const BANNER = /(this email was sent from outside of[^*\n]*(\*\*[^*]*\*\*)?\s*|\[?\s*you don'?t often get email from \S+\.?( learn why this is important( at \S+)?)?\s*\]?)/gi;
-export const cleanText = (s) => (s || "").replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, " ")
+// the line Taskuary writes over a GitHub/Asana/monday item for TRIAGE ("[pull request by X - association: Y]") is
+// evidence for the judge, never what they said - remote_assistant.PROVENANCE is the same rule for the phone
+export const PROVENANCE = /^\s*\[(?:pull request|issue) by [^\]\n]*\]\s*|^\s*\[(?:Asana task|Monday item)[^\]\n]*\]\s*/i;
+export const cleanText = (s) => (s || "").replace(PROVENANCE, "").replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, " ")
   .replace(/<[^>]+>/g, " ").replace(/&nbsp;|&#\d+;|&\w+;/g, " ").replace(BANNER, "")
   .replace(/[^\S\n]+/g, " ").replace(/ ?\n ?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 
