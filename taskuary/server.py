@@ -14,8 +14,7 @@ from . import config
 from . import store as store_mod
 from .store import SQLiteStore, task_ref
 from .ingest import ingest_message, split_message, task_from_message
-from .reports import (PLANNED, REGISTRY, note_app_up, render_report, resolve_cfg, run_due_reports,
-                      run_report_source)
+from .reports import (PLANNED, REGISTRY, note_app_up, render_report, resolve_cfg, run_due_reports, run_one)
 from . import agents as hub_agents
 from . import cli_connections
 from . import blackboard
@@ -153,6 +152,7 @@ async def _lifespan(_app):
     except Exception as e: logger.warning(f'triage-failure upgrade skipped: {e}')
     note_app_up(store, start=True)   # this launch, so a shut-overnight gap is not read as a dead scheduler
     threading.Thread(target=poll_forever, daemon=True).start()
+    threading.Thread(target=reports_forever, daemon=True).start()   # the reports' own clock - never the mail's
     threading.Thread(target=quick_forever, daemon=True).start()   # the chat clock, never behind a slow sync
     threading.Thread(target=doorway_forever, daemon=True).start()  # the assistant chat, answered as fast as it is typed
     waitroom.watch(store)          # notes queued for a working agent land when it stops
@@ -663,6 +663,7 @@ def _run_operation(op: dict, background: BackgroundTasks):
                 raise operations.Halt(f"{out.get('ref') or 'it'} needs a repository first - {out.get('reason') or 'pick one'}", out)
             return out
         return mine_message(mid, MineBody(kind='task', title=p.get('title')), background)
+    if kind == 'idea.act': return assistant.act(store, tid, str(p.get('verb') or ''), ACTOR)
     if kind == 'message.file': return file_message(mid, NotATaskBody(learn=bool(p.get('learn', True))), background)
     if kind == 'message.reply': return open_reply(mid, None)
     if kind == 'dispatch.prepare':
@@ -700,7 +701,7 @@ def _run_operation(op: dict, background: BackgroundTasks):
         return {'field': field, 'value': value, **taught}
     # THE APP ITSELF, BY NAME (the assistant-runs-the-app design, 2026-09-18). Each handler runs the road
     # the tab's own button runs, audits as the assistant, and hands back an `undo` the receipt can offer.
-    if kind in ('report.run', 'report.pause', 'report.resume', 'report.reach', 'report.edit', 'report.delete'):
+    if kind in ('report.run', 'report.pause', 'report.resume', 'report.route', 'report.edit', 'report.delete'):
         src = store.get_source(tid)
         if not src or src.get('Channel') != 'report': raise HTTPException(404, 'no such report')
         cfg = json.loads(src.get('ConfigJson') or '{}') or {}
@@ -715,13 +716,18 @@ def _run_operation(op: dict, background: BackgroundTasks):
             store.audit('source', tid, 'resume' if on else 'pause', 'assistant', detail={'title': title})
             return {'title': title, 'active': on,
                     'undo': {'kind': 'report.pause' if on else 'report.resume', 'target': tid, 'params': {}, 'label': f"{'Pause' if on else 'Resume'} {title}"}}
-        if kind == 'report.reach':
-            from .reports import REACH, reach_of
-            want, prev = str(p.get('reach') or '').strip().lower(), reach_of(cfg)
-            if want not in REACH: raise HTTPException(422, f"a report reaches you {', '.join(REACH)} - not {want or 'nothing'}")
-            store.save_source({'SourceId': tid, 'ConfigJson': json.dumps({**cfg, 'reach': want})}, ACTOR)
-            store.audit('source', tid, 'reach', 'assistant', detail={'title': title, 'from': prev, 'to': want})
-            return {'title': title, 'reach': want, 'undo': {'kind': 'report.reach', 'target': tid, 'params': {'reach': prev}, 'label': f'Put {title} back to reaching you: {prev}'}}
+        if kind == 'report.route':
+            # one line of the route card - the same card the Reports page edits (the owner, 2026-09-27)
+            from .reports import full_route, route_words, set_line
+            line = str(p.get('line') or '').strip().lower()
+            try: new = set_line(cfg, line, str(p.get('how') or '').strip().lower(), str(p.get('when') or ''),
+                                str(p.get('rule') or '').strip().lower(), p.get('count'), str(p.get('text') or ''))
+            except ValueError as e: raise HTTPException(422, str(e))
+            prev = full_route(cfg)[line]
+            store.save_source({'SourceId': tid, 'ConfigJson': json.dumps(new)}, ACTOR)
+            store.audit('source', tid, 'route', 'assistant', detail={'title': title, 'line': line, 'from': prev, 'to': new['route'][line]})
+            return {'title': title, 'route': route_words(new),
+                    'undo': {'kind': 'report.route', 'target': tid, 'params': {'line': line, **prev}, 'label': f'Put {title} back: {route_words(cfg)}'}}
         if kind == 'report.edit':
             patch = p.get('config') if isinstance(p.get('config'), dict) else {}
             if not patch: raise HTTPException(422, 'say what to change - config is the keys to change')
@@ -862,7 +868,9 @@ def _run_operation(op: dict, background: BackgroundTasks):
         return out
     # the page's "Save and end session" (TasksView.wrapUp posts close=False): the agent ends, the task stays
     if kind == 'agent.stop': return _wrap_task(tid, False) if p.get('wrap') else stop_task_agent(tid)
-    if kind == 'report.rerun': return report_rerun(tid)
+    if kind == 'report.rerun':
+        from . import remote_assistant
+        return _rerun_report(tid, asked=remote_assistant.asking())
     if kind == 'memory.remember':
         from . import concierge
         return {'memoryId': concierge.remember_fact(store, str(p.get('note') or ''), ACTOR)}
@@ -2521,61 +2529,13 @@ def assistant_ideas(status: str = None, mid: int = None):
         return out
     return {'data': [row(i) for i in store.list_ideas(status or None, mid)]}
 
-class IdeaBody(BaseModel): days: int = 1
+class IdeaBody(BaseModel): days: int = 1; until: str = None
 
 @app.post('/api/assistant/ideas/{iid}/{verb}')
-def assistant_act(iid: int, verb: str, body: IdeaBody = None, background: BackgroundTasks = None):
-    """One button on one line: followup (the chase, drafted onto the task), task (the agent starts),
-    discuss (the full Assistant workspace), dismiss, snooze, or done."""
-    try:
-        if verb == 'discuss':
-            out = assistant.discussion_task(store, iid, ACTOR)
-            if out.get('created') and background is not None:
-                background.add_task(_assistant_opens, out['taskId'])
-            return out
-        return assistant.act(store, iid, verb, ACTOR, days=(body.days if body else 1),
-                             learn_async=background.add_task if background is not None else None)
-        return assistant.act(store, iid, verb, ACTOR, days=(body.days if body else 1),
-                             learn_async=background.add_task if background is not None else None)
-    except ValueError as e: raise HTTPException(422, str(e))
-
-# What the assistant is told when the owner opens one of its notes for discussion. It is an
-# instruction, never recorded as the owner's words (general.send_prompt as_owner=False).
-#
-# The chat used to open with the assistant's note copied into it and then sit there: the owner had
-# just READ that sentence on the Timeline, so the conversation began by repeating them to
-# themselves and waiting. "Discuss" is a request for the assistant's next move, so it makes one.
-OPENING = ("The owner has just opened this conversation from your note on the Timeline. They have "
-           "already read that note - do not repeat it back to them. Open the discussion instead: "
-           "say what you would actually DO about it, concretely, in one short paragraph, and then "
-           "ask the single thing you need from them to go ahead. If you need nothing, say what you "
-           "propose to do and stop. No preamble, no restating the situation.")
-
-
-def _assistant_opens(task_id: int):
-    """The assistant's first turn in a discussion it was asked to have. Runs after the response, so
-    the workspace is already on screen when it starts writing. Never raises: an opening line that
-    could not be written costs a sentence, and the owner can simply type - which is exactly where
-    this conversation stood before."""
-    from . import general
-    if general.session_for(task_id): return          # already in conversation - not ours to interrupt
-    if not general.provider_options(store):
-        # no brain configured. Starting a session anyway left one PARKED on the terminal list,
-        # waiting forever on an answer nothing was ever going to write - a live-looking agent on
-        # the Board doing nothing, from a click that should have done nothing.
-        logger.info(f'no AI connector, so the assistant cannot open {task_ref(task_id)}')
-        return
-    try:
-        general.start_session(store, task_id, actor=ACTOR).send_prompt(OPENING, as_owner=False, echo=False)
-    except Exception as e:
-        general.drop_session(task_id)                # and never leave half a session behind
-        logger.info(f'the assistant could not open {task_ref(task_id)}: {str(e)[:200]}')
-
-
-@app.post('/api/assistant/talk/{iid}')
-def assistant_talk(iid: int, body: TextBody):
-    """Talk back to one suggestion: corrections and questions get an answer, not a verdict button."""
-    try: return assistant.talk(store, iid, body.body, ACTOR, _llm())
+def assistant_act(iid: int, verb: str, body: IdeaBody = None):
+    """One word on one line (assistant.VERBS): task (Make a task), agent (Send to agent), dismiss (Not ours),
+    snooze (Remind me - `until` a day, or `days`), done."""
+    try: return assistant.act(store, iid, verb, ACTOR, days=(body.days if body else 1), until=(body.until if body else None))
     except ValueError as e: raise HTTPException(422, str(e))
 
 # what GeneralWorkspace reads to open a chat with its question already asked (newTask.js)
@@ -3655,16 +3615,16 @@ def _rerun_report(sid: int, asked: dict | None = None) -> dict:
     try: title = json.loads(src.get('ConfigJson') or '{}').get('title') or src.get('Address')
     except ValueError: title = src.get('Address')
     def work():
-        try:
-            out = run_report_source(store, src, _llm(), trigger='manual'); store.touch_source(sid)
+        # the one road (reports.run_one): a manual run is extra - it never uses up the report's schedule
+        try: out = run_one(store, src, _llm(), trigger='manual')
         except Exception as e:
-            logger.warning(f'rerun of report {sid} failed: {e}'); out = {'error': str(e)[:300]}
+            logger.warning(f'rerun of report {sid} failed: {e}'); out = {'error': str(e)[:300], 'failed': True}
         if asked:
             from . import remote_assistant
             said = str(out.get('summary') or out.get('said') or out.get('error') or out.get('subject') or 'done').strip()
-            failed = bool(out.get('error')) or str(out.get('subject') or '').endswith('FAILED')
-            text = (f"{title} {'could not run' if failed else 'landed'}: {said[:900]}"
-                    + ('' if failed else f"\n\nIt is in the pipe. Say \"read {title}\" for the whole thing."))
+            failed = bool(out.get('failed') or out.get('error'))
+            text = (f"{title} {'could not run' if failed else 'is already running' if out.get('busy') else 'landed'}: {said[:900]}"
+                    + (f"\n\nIt is in the pipe. Say \"read {title}\" for the whole thing." if out.get('message_id') else ''))
             try: remote_assistant.send(store, asked['channel'], asked['chat'], text, asked.get('connector_id'))
             except Exception as e: logger.warning(f'the landed report could not reach {asked.get("channel")}: {e}')
     # queued, not awaited: the report lands on the Timeline like a scheduled run, and the pipe picks it up
@@ -3724,7 +3684,7 @@ def concierge_setup(body: SetupBody2, background: BackgroundTasks):
     return made
 
 
-# What the walk is told to do first. Like OPENING it is an instruction, never the owner's words -
+# What the walk is told to do first. It is an instruction, never the owner's words -
 # their ask is already the one human comment on the task, and repeating it back as a second user
 # turn is the conversation talking to itself.
 WALK_OPENING = (
@@ -3747,7 +3707,7 @@ def _walk_opens(task_id: int, text: str):
     try:
         if general.session_for(task_id): return          # already in conversation - not ours to interrupt
         if not general.provider_options(store):
-            # same reason as _assistant_opens: a session with no brain parks forever, looking live
+            # a session with no brain parks forever, looking live
             logger.info(f'no AI connector, so the walk-through {task_ref(task_id)} cannot start')
             _walk_cannot(task_id, 'No AI is connected yet, so I cannot start the walk. Connect one under '
                                   'Connections and ask me again.')
@@ -3987,14 +3947,17 @@ def retriage_message(mid: int):
         raise HTTPException(422, str(e)[:300])
     return {**out, 'ref': task_ref(out['task_id']) if out.get('task_id') else None}
 
-@app.post('/api/reports/run')
-def reports_run(): return {'ran': run_due_reports(store)}
-
 @app.get('/api/sources')
 def sources():
-    # default_repo rides along so the Board's repo picker preselects it
-    return {'data': store.list_sources(active_only=False),
-            'default_repo': (cfg.get('github') or {}).get('default_repo')}
+    # default_repo rides along so the Board's repo picker preselects it; a report carries its route in
+    # the server's own words, so the page never re-derives the rules (reports.route_words)
+    from .reports import route_words
+    rows = store.list_sources(active_only=False)
+    for r in rows:
+        if r.get('Channel') != 'report': continue
+        try: r['RouteWords'] = route_words(json.loads(r.get('ConfigJson') or '{}'))
+        except ValueError: pass
+    return {'data': rows, 'default_repo': (cfg.get('github') or {}).get('default_repo')}
 
 @app.post('/api/sources')
 def save_source(body: SourceBody):
@@ -4057,14 +4020,6 @@ def delete_source(sid: int):
     from .docsync import sync_connections
     sync_connections(store, ACTOR)
     return {'ok': True}
-
-@app.post('/api/sources/{sid}/run')
-def run_source_now(sid: int):
-    src = store.get_source(sid)
-    if not src: raise HTTPException(404, 'source not found')
-    out = run_report_source(store, src, _llm())
-    store.touch_source(sid)
-    return out
 
 @app.get('/api/reports/last-runs')
 def report_last_runs():
@@ -6216,8 +6171,8 @@ def _quick_due() -> list:
             due.append(c['Type'])
     return due
 
-def _poll_reports(backfill_hours: float = 0, what: str = 'syncing', startup: bool = False,
-                  only=None, wait: bool = False, on_fetched=None, run_reports: bool = True):
+def _poll_reports(backfill_hours: float = 0, what: str = 'syncing',
+                  only=None, wait: bool = False, on_fetched=None):
     """The full lane; `only` hands the call to the chat lane (_poll_quick) instead."""
     if only is not None:
         return _poll_quick(only, what, wait, timer=bool(getattr(_QUICK_TIMER, 'active', False)), on_fetched=on_fetched)
@@ -6309,7 +6264,6 @@ def _poll_reports(backfill_hours: float = 0, what: str = 'syncing', startup: boo
             blackboard.roll_daily(target_store)
         except Exception as e:
             logger.warning(f'the wall roll-up failed: {e}')
-        _status_progress(target_store, status, what, phase='running_reports')
         try:                                            # ...and archived chats past their keep-days go, once a day (retention.py)
             from . import retention
             retention.tick(target_store)
@@ -6321,16 +6275,6 @@ def _poll_reports(backfill_hours: float = 0, what: str = 'syncing', startup: boo
         except Exception as e:
             logger.warning(f'whatsapp log trim skipped: {e}')
         _lap('housekeeping')
-        # A startup catch-up says NO here: pulling the inputs in is what 'catching up' means,
-        # and the reports that were due get a pass of their own behind it (catch_up_on_startup).
-        if run_reports:
-            run_due_reports(target_store, startup)      # ...the seeded 'Assistant' report among them (assistant.py)
-            _lap('reports')
-            try:                                        # ...and the phone's morning line, once a day (remote_assistant)
-                from . import remote_assistant
-                remote_assistant.morning_line(target_store)
-            except Exception as e:
-                logger.warning(f'the morning line was skipped: {e}')
         return added
     finally:
         try:
@@ -6434,14 +6378,54 @@ def _catchup_hours(ceiling_days: int) -> float:
     return 0 if gap_h <= 1 else min(ceiling, gap_h + STARTUP_OVERLAP.total_seconds() / 3600)
 
 
+REPORT_TICK = 60                # seconds between looks at which reports are due - is_due does the rest
+_REPORTS_BUSY = threading.Lock()
+
+
+def report_pass(startup: bool = False) -> int | None:
+    """Every report that is due, then the phone's morning line. On the reports' OWN clock: they ran
+    inside the mail poll, so turning the mail poll off stopped every report and turning startup catch-up
+    off stopped every "on app start" one (the owner, 2026-09-27). A startup pass WAITS for a running
+    pass rather than being dropped - it is the only one that runs the "on app start" reports."""
+    if not _REPORTS_BUSY.acquire(blocking=startup): return None
+    try:
+        n = run_due_reports(store, startup)
+        try:
+            from . import remote_assistant
+            remote_assistant.morning_line(store)
+        except Exception as e: logger.warning(f'the morning line was skipped: {e}')
+        return n
+    finally: _REPORTS_BUSY.release()
+
+
+def reports_forever():
+    """The reports' clock. The first pass is the startup one (catch_up_on_startup runs it behind the
+    mail), so this waits a tick before its first look."""
+    while True:
+        time.sleep(REPORT_TICK)
+        try: report_pass()
+        except Exception as e: logger.warning(f'scheduled report pass failed: {e}')   # a bad pass must not end the loop
+
+
+@app.post('/api/reports/due')
+def reports_due(background: BackgroundTasks):
+    """The Reports tab's "Run due now": the reports that are owed, and nothing else - not a mail sync."""
+    if _REPORTS_BUSY.locked(): return {'report': 'busy'}
+    background.add_task(report_pass)
+    return {'report': 'running'}
+
+
 def catch_up_on_startup():
     """Whatever arrived while the app was closed was polled by nobody, and Taskuary is not a
     service - it is a window you open. So opening it reaches back past the watermark - but only
     as far as the app was actually closed, with `startup_sync_days` (default 3) as the ceiling.
-    0 turns the startup poll off entirely."""
+    0 turns the startup MAIL poll off; the reports owed at app start still run."""
     try: days = int(store.get_setting('startup_sync_days') or 0)
     except ValueError: days = 0
-    if days <= 0: return
+    if days <= 0:
+        t = threading.Thread(target=lambda: report_pass(startup=True), daemon=True)
+        t.start()
+        return t
     hours = _catchup_hours(days)
     logger.info(f"startup: {'incremental poll (closed under an hour)' if hours == 0 else f'catching up on the {hours:.1f} hour(s) it was closed'}")
     def _catch_up():
@@ -6454,12 +6438,9 @@ def catch_up_on_startup():
         # startup and six reports were the other 165 s, all of it behind one 'catching up on
         # the 27 hour(s)' banner (measured on the owner's box, 2026-09-19). So the catch-up
         # ENDS when the mail is in and judged...
-        _poll_reports(hours, what=f'catching up on the {hours:.0f} hour(s) it was closed' if hours else 'syncing',
-                      startup=True, run_reports=False)
-        # ...and the reports that were due take their own pass, under their own name. It reads
-        # the sources again on the way in, which is cheap (~2 s) and catches whatever landed
-        # while the backlog was being judged.
-        _poll_reports(0, what='running the reports that were due', startup=True)
+        _poll_reports(hours, what=f'catching up on the {hours:.0f} hour(s) it was closed' if hours else 'syncing')
+        # ...and the reports that were due take their own pass, on their own lock
+        report_pass(startup=True)
         # the Morning digest needs no call of its own anymore: it is a seeded REPORT, run by
         # the pass above like every other one. Consolidate what the verdicts taught next,
         # on the same once-a-day rhythm.
