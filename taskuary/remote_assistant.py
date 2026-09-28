@@ -793,7 +793,9 @@ def run_act(store, act: dict, item: dict | None, actor: str = 'owner') -> str:
                               'item': None}, store=store, extra=rows)
         if verb == 'defer':
             # Remind me asks for the day, as the desktop's picker does; a day typed instead goes to the model's task.defer
-            rows = [(label, {'t': 'remind', 'tid': on.get('tid'), 'until': until}) for label, until in REMIND_DAYS]
+            # ...an Advisor idea's own day, the desktop's picker on the idea (C5, 2026-09-27)
+            aim = {'idea': on['idea']} if on.get('kind') == 'idea' and on.get('idea') else {'tid': on.get('tid')}
+            rows = [(label, {'t': 'remind', **aim, 'until': until}) for label, until in REMIND_DAYS]
             return turn_text({'say': f"Remind you about {on.get('ref') or on.get('title') or 'this'} when? Or say a day.", 'item': None},
                              store=store, extra=rows + [('Cancel', {'t': 'stay'})])
         if verb == 'answer_agent':
@@ -826,6 +828,10 @@ REMIND_DAYS = (('Tomorrow', 'tomorrow'), ('Next week', '1 week'), ('In 2 weeks',
 def _remind(store, act: dict, actor: str) -> str:
     """The day picked: the task page's own road (remind.set_reminder), then the walk moves on - it is off the rail."""
     from . import concierge, operations, remind
+    if act.get('idea'):
+        from . import assistant
+        out = assistant.act(store, int(act['idea']), 'snooze', actor, until=act['until'])
+        return '\n\n'.join([f"Put away until {out['when']} - it comes back that morning.", turn_text(concierge.surface(store, actor=actor), store=store)])
     out = remind.set_reminder(store, int(act['tid']), act['until'], actor)
     operations.record_direct(store, 'task.defer', int(act['tid']), {'until': act['until']}, actor, out)
     if not out.get('remindAt'): return 'It is back on your rail now.'
@@ -914,6 +920,11 @@ _MD = (
 )
 
 
+# the line Taskuary writes over a GitHub/Asana/monday item for TRIAGE (who wrote it, their standing) - evidence for the
+# judge, never what they said; ui.jsx PROVENANCE is the same rule for the desktop
+PROVENANCE = re.compile(r'^\s*\[(?:pull request|issue) by [^\]\n]*\]\s*|^\s*\[(?:Asana task|Monday item)[^\]\n]*\]\s*', re.I)
+
+
 def _plain(text) -> str:
     """Markdown as WORDS. Neither sender sets parse_mode - Telegram's sendMessage and the WhatsApp
     bridge both post plain text - so every ** and ` and [](...) arrived as its own punctuation once
@@ -924,7 +935,7 @@ def _plain(text) -> str:
     def _hold(m):
         kept.append(m.group(1))
         return f'\x00{len(kept) - 1}\x00'
-    out = _CODE.sub(_hold, str(text or ''))
+    out = _CODE.sub(_hold, PROVENANCE.sub('', str(text or ''), count=1))
     for pat, rep in _MD: out = pat.sub(rep, out)
     for i, code in enumerate(kept): out = out.replace(f'\x00{i}\x00', code)
     return out
@@ -979,7 +990,13 @@ def _draft_text(store, item: dict | None) -> str:
     except Exception as e:
         logger.debug(f'the phone could not read the draft: {e}')
         return ''
-    return str(rv.get('DraftText') or '').strip() if rv.get('Kind') == 'draft' else ''
+    # a close-out card's words are the reply riding with it - the yes posts THAT (verdicts reply_text)
+    if rv.get('Kind') == 'action' and item.get('closeout') and rv.get('TaskId'):
+        rv = store._one("SELECT * FROM review WHERE TaskId=? AND Status='pending' AND Kind IN ('draft','draft_reply') "
+                        "ORDER BY ReviewId DESC LIMIT 1", (rv['TaskId'],)) or {}
+    # 'draft_reply' is the one an agent writes when it finishes - only 'draft' was read, so the reply a finished
+    # agent's card asked you to approve never appeared on the phone (2026-09-28)
+    return str(rv.get('DraftText') or '').strip() if rv.get('Kind') in ('draft', 'draft_reply') else ''
 
 
 # the one word the phone adds to what the walk offers: the rest of what is folded, as the card's More
@@ -1072,7 +1089,10 @@ def then_line(out: dict, store=None) -> str:
     """"Send the reply: sends the draft above, in your name." - only on a card that shows what it is about."""
     c = primary(out)
     if store is None or not c or agent_answers(out.get('item')) or out.get('proposal'): return ''
-    said = THEN_KIND.get((c['verb'], (out.get('item') or {}).get('kind'))) or THEN.get(c['verb'])
+    it = out.get('item') or {}
+    said = ((it['closeout'] + (', then posts the reply above as its comment.' if it.get('rides') else '.'))
+            if c['verb'] == 'approve' and it.get('closeout')
+            else THEN_KIND.get((c['verb'], it.get('kind'))) or THEN.get(c['verb']))
     return f"{c.get('label')}: {said}" if said else ''
 
 

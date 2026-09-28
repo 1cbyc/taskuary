@@ -37,6 +37,7 @@ KINDS = {
     'task.create_from_text':    ('text', ('kind', 'text'), None),
     'message.archive':          ('message', (), 'dismissed'),
     'item.settle':              ('item', ('key', 'verb'), None),
+    'idea.act':                 ('idea', ('verb',), None),        # an Advisor idea's own words (assistant.act)
     'review.approve':           ('review', (), None),
     'agent.answer':             ('task', ('text',), None),
     'agent.stop':               ('task', (), None),
@@ -73,7 +74,7 @@ KINDS = {
     'report.run':               ('source', (), None),
     'report.pause':             ('source', (), None),
     'report.resume':            ('source', (), None),
-    'report.reach':             ('source', ('reach',), None),
+    'report.route':             ('source', ('line', 'how'), None),
     'report.edit':              ('source', ('config',), None),
     'report.delete':            ('source', (), None),
     'setting.set':              ('setting', ('setting', 'value'), None),   # `setting`, not `key`: `key` is the pile key the chat fills in

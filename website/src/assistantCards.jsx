@@ -33,6 +33,9 @@ import { RepoPicker } from "./RepoPicker.jsx";
 import { useCliSetup, SetupButton, CliPane, canSetup } from "./cliSetup.jsx";
 import OwnerForm from "./OwnerForm.jsx";
 import { summarize, stateOf, whoOf } from "./walkSummary.js";
+import { CLOSE_OUT, closeoutOf, reviewText } from "./reviewProposal.js";
+import { OFFER_HINT, OFFER_LABEL, useCloseoutState } from "./closeoutState.js";
+import { READY } from "./taskLifecycle.js";
 
 const errText = (e) => e?.response?.data?.detail || e?.message || "That did not work";
 const edge = (lane) => { const r = laneMeta(lane).role; return r ? ROLES[r].solid : "#d3ccc1"; };
@@ -129,10 +132,20 @@ function Lead({ text, who }) {
 }
 
 // who wants what, for a card with a task behind it: the task's own summary, which triage writes
-function TaskLead({ card, fallback }) {
+// (`did`: the card's summary is the AGENT's, drawn by AgentDid - never the trigger's stand-in)
+function TaskLead({ card, fallback, did = false }) {
   const doc = useFetched(card?.tid ? `/api/tasks/${card.tid}` : null, card?.presentation_revision);
   const sum = String(doc?.task?.Summary || "");
-  return <Lead text={firstSentence(sum) || firstSentence(card?.summary) || fallback || card?.title} who={card?.who} />;
+  return <Lead text={firstSentence(sum) || (!did && firstSentence(card?.summary)) || fallback || card?.title} who={did ? null : card?.who} />;
+}
+
+// THE CARD'S THREE PARTS (the owner, 2026-09-28: "the goal is to see what triggered the task, agent action, and what
+// we are reviewing"): every card with a task behind it tells it in that order - the trigger as the lead, this line,
+// then the thing to decide. The agent's part lived only inside a `why` sentence, or unlabelled, or nowhere.
+function AgentDid({ card, who, text }) {
+  const t = String(text ?? card?.summary ?? "").trim();
+  if (!t) return null;
+  return <div className="tq-card-excerpt"><b>{who || card?.agent || "The agent"} did:</b> {t}</div>;
 }
 
 // MORE ONLY WHEN THERE IS MORE (the owner, 2026-09-23: "the less button when there is only one line
@@ -394,28 +407,54 @@ export function ReplyCard({ card, onDone, onOpenTask, onTimeline }) {
   // behind More and the draft is the thing in the open (2026-09-23)
   const [full, setFull] = useState(false);
   const nav = React.useContext(CardNav);
+  // the reply waiting beside a close-out: the two are ONE decision here, as on the task page - the merge first,
+  // then this reply goes out (the owner, 2026-09-27)
+  const [mate, setMate] = useState(null);
+  const [coRv, setCoRv] = useState(null);
   useEffect(() => {
     let live = true;
     api.get("/api/reviews", { params: { status: "pending" } }).then(({ data }) => {
       if (!live) return;
       setRv((data.data || []).find((x) => x.ReviewId === card.rid) || { gone: true });
+      const found = (data.data || []).find((x) => x.ReviewId === card.rid);
+      setMate(found && closeoutOf(found) ? (data.data || []).find((x) => x.TaskId === found.TaskId && x.Kind !== "action"
+        && (x.CanSend !== false || String(x.Channel || "").toLowerCase() === "github")) || null : null);   // the close-out carries a GitHub comment
+      // the task's close-out, whichever card is on the table - the reply's card reads GitHub's state through it too
+      setCoRv(found && closeoutOf(found) ? found : found ? (data.data || []).find((x) => x.TaskId === found.TaskId && closeoutOf(x)) || null : null);
     }).catch((e) => live && setErr(errText(e)));
     return () => { live = false; };
   }, [card.rid, card.mid, card.presentation_revision]);
   const action = rv?.Kind === "action";
+  const co = closeoutOf(rv);
+  // THE CARD READS GITHUB FIRST (closeoutState.js): Close out is live only when this repo's rules let it merge now
+  const { gh, reload: reloadGh, act } = useCloseoutState(coRv?.ReviewId);
+  const blocked = !!gh && !gh.ok;
+  const cop = co || closeoutOf(coRv);
   const draft = () => {
+    if (mate) return mate.DraftText || "";
     if (!action) return rv?.DraftText || "";
+    if (co) return reviewText(rv);
     try { const p = JSON.parse(rv.DraftText || ""); return p.text || `${p.action}${p.why ? ` — ${p.why}` : ""}`; } catch { return rv?.DraftText || ""; }
   };
   const value = text ?? draft();
   const stale = !!(rv?.Stale ?? card.stale);          // a raw review row's Stale is 0, which React would draw
-  const who = rv ? (rv.FromName && rv.FromEmail ? `${rv.FromName} <${rv.FromEmail}>` : rv.FromName || rv.FromEmail || "them") : "";
+  // a GitHub author is their login - their "address" is GitHub's own noreply mailbox, which nobody reads
+  const onGithub = String(rv?.Channel || "").toLowerCase() === "github";
+  const who = rv ? (rv.FromName && rv.FromEmail && !onGithub ? `${rv.FromName} <${rv.FromEmail}>` : rv.FromName || rv.FromEmail || "them") : "";
   const decide = async (verb) => {
     setBusy(verb); setErr("");
     try {
-      const { data } = await api.post(`/api/reviews/${card.rid}/decide`, { verb, final_text: verb === "approve" ? value : null, note: null });
+      // Decline and Close out anyway belong to the close-out, whichever card is showing; the reply rides with them
+      const onCo = ["close_pr", "merge_anyway"].includes(verb) && coRv ? coRv.ReviewId : card.rid;
+      const withReply = mate || (onCo !== card.rid && !action);
+      const { data } = await api.post(`/api/reviews/${onCo}/decide`, withReply
+        ? { verb, final_text: null, note: null, reply_text: verb !== "reject" ? value : null }
+        : { verb, final_text: verb === "approve" ? value : null, note: null });
+      if (data.refused) reloadGh();
       if (data.send_error) throw new Error(data.send_error);
-      onDone?.(verb === "approve" ? (action ? "Done — the action ran." : `Sent to ${who}.`) : action ? "Dismissed — nothing ran." : "Dismissed — no reply goes out.");
+      const sentTo = mate && verb !== "reject" ? ` The reply went to ${mate.FromName || "them"}.` : "";
+      onDone?.(verb === co?.alt?.verb ? `Done — ${co.alt.then}.${sentTo}` : verb === "approve" ? (co ? `Done — ${co.then}.${sentTo}` : action ? "Done — the action ran." : `Sent to ${who}.`)
+        : co ? "Not yet — the task stays open." : action ? "Dismissed — nothing ran." : "Dismissed — no reply goes out.");
     } catch (e) { setErr(errText(e)); }
     setBusy("");
   };
@@ -436,8 +475,8 @@ export function ReplyCard({ card, onDone, onOpenTask, onTimeline }) {
   };
   if (rv?.gone) return <CardShell card={card} kicker="already handled" title={card.title} sub="This one is no longer waiting on you." />;
   const verb = action
-    ? <Button size="small" variant="contained" disableElevation disabled={!!busy || !rv} startIcon={<DoneRoundedIcon />} onClick={() => decide("approve")} sx={primary}>{busy === "approve" ? "Running…" : "Run it"}</Button>
-    : rv?.CanSend === false ? null : rv && !value.trim() && !stale ? (
+    ? <Button size="small" variant="contained" disableElevation disabled={!!busy || !rv || (co && blocked)} title={co && blocked ? gh.reason : undefined} startIcon={<DoneRoundedIcon />} onClick={() => decide("approve")} sx={primary}>{busy === "approve" ? (co ? co.busy : "Running…") : co ? co.label : "Run it"}</Button>
+    : rv?.CanSend === false && !card.closeout ? null : rv && !value.trim() && !stale ? (
       /* NOTHING TO SEND YET: a disabled Send was the only button, and the redraft word it covers was
          hidden as its duplicate - no way to get a draft from the card at all (2026-09-23) */
       <Button size="small" variant="contained" disableElevation disabled={!!busy} startIcon={<RefreshRoundedIcon />}
@@ -451,24 +490,29 @@ export function ReplyCard({ card, onDone, onOpenTask, onTimeline }) {
         title="Rewrites the draft from the newest message, then you approve it">
         {busy === "redraft" ? "Refreshing…" : "Refresh the draft"}</Button>
     ) : (
-      <Button size="small" variant="contained" disableElevation disabled={!!busy || !rv || !value.trim()} startIcon={<SendRoundedIcon />} onClick={() => decide("approve")} sx={primary}>
-        {busy === "approve" ? "Sending…" : "Send reply"}</Button>
+      <Button size="small" variant="contained" disableElevation disabled={!!busy || !rv || !value.trim() || blocked} title={blocked ? gh.reason : undefined} startIcon={<SendRoundedIcon />} onClick={() => decide("approve")} sx={primary}>
+        {busy === "approve" ? "Sending…" : card.tid ? CLOSE_OUT : "Send reply"}</Button>
     );
-  const then = action ? <><b>Run it</b> does what the agent proposed - nothing runs until you press it.</>
+  const then = co ? <><b>{co.label}</b> {co.then}{mate ? <>, then the reply above {sendsBy(mate.Channel, mate.FromName || "them")}</> : null}.</>
+    : action ? <><b>Run it</b> does what the agent proposed - nothing runs until you press it.</>
     : rv && !value.trim() && !stale ? <><b>Draft with AI</b> writes one for you to approve here - nothing is sent.</>
     : stale ? <><b>Refresh the draft</b> rewrites it from the newest message; you still approve it.</>
-    : rv ? <><b>Send reply</b> {sendsBy(rv.Channel, who)}.</> : null;
+    : rv && card.closeout ? <><b>{CLOSE_OUT}</b> {card.closeout}, then the reply above {sendsBy(rv.Channel, who)}.</>
+    : rv ? <><b>{card.tid ? CLOSE_OUT : "Send reply"}</b> {sendsBy(rv.Channel, who)}{card.tid ? " and closes the task" : ""}.</> : null;
   return (
-    <CardShell card={card} kicker={action ? "an agent asks to act" : value.trim() ? "reply · draft ready" : "reply · no draft yet"}
-      lead={action ? <Lead text={rv?.Subject || card.title} /> : <TaskLead card={card} fallback={rv?.Subject} />} err={err}>
+    <CardShell card={card} kicker={co || (card.tid && value.trim()) ? READY : action ? "an agent asks to act" : value.trim() ? "reply · draft ready" : "reply · no draft yet"}
+      lead={action ? <Lead text={rv?.Subject || card.title} /> : <TaskLead card={card} fallback={rv?.Subject} did={!!card.summary} />} err={err}>
+      {(action ? !!co : true) && <AgentDid card={card} />}
       {rv && (
         <TextField fullWidth multiline minRows={2} maxRows={9} value={value} onChange={(e) => setText(e.target.value)}
-          placeholder={action ? "" : "Write your answer here"}
+          placeholder={action && !mate ? "" : "Write your answer here"}
           sx={{ mt: 1, "& textarea": { fontSize: 12.5, lineHeight: 1.5 } }} />
       )}
       {!action && stale && <div className="tq-card-err">New messages arrived after this draft. Refresh the draft with the latest context before sending.</div>}
       {!action && rv && draftState({ ...rv, HasDraft: value.trim() ? 1 : 0 }).line && <div className={draftState(rv).state === "failed" ? "tq-card-err" : "tq-card-excerpt"}>{draftState({ ...rv, HasDraft: value.trim() ? 1 : 0 }).line}</div>}
-      {!action && sendBlockLine(rv) && <div className="tq-card-excerpt">{sendBlockLine(rv)}</div>}
+      {!action && !card.closeout && sendBlockLine(rv) && <div className="tq-card-excerpt">{sendBlockLine(rv)}</div>}
+      {/* what GitHub says about this pull request now - why Close out is off, or the red it will merge past */}
+      {gh && (blocked || gh.note) && <div className={blocked ? "tq-card-err" : "tq-card-excerpt"}>{blocked ? `Not now - ${gh.reason}.` : `${gh.note}.`}</div>}
       {/* WHAT YOU ARE ANSWERING, said to be that (the owner, 2026-09-14: "though you need to see what
           you are responding to") - one press away, under the draft */}
       {card.mid && <button type="button" className="tq-card-more" onClick={() => setFull((v) => !v)}>{full ? "Less" : "More - what they wrote"}</button>}
@@ -476,9 +520,18 @@ export function ReplyCard({ card, onDone, onOpenTask, onTimeline }) {
       {/* "Mark done" arrives as a conversation word; off the walk (no words), the same road is still offered
           under More actions */}
       <Foot verb={verb} then={then} covers={["approve", "redraft"]}
-        extra={card.tid && !nav.also?.length ? [{ verb: "finish", label: busy === "finish" ? "Closing…" : "Mark done",
+        extra={[...(gh?.offers || []).map((o) => ({ verb: o, label: busy === o ? "…" : OFFER_LABEL[o], title: OFFER_HINT[o], disabled: !!busy || !rv,
+          onClick: async () => {
+            if (o === "anyway") return decide("merge_anyway");
+            setBusy(o); setErr("");
+            try { const said = await act(o); onDone?.(`${said}. Close out again once the checks pass.`); } catch (e) { setErr(errText(e)); }
+            setBusy("");
+          } })),
+          ...(cop?.alt ? [{ verb: cop.alt.verb, label: busy === cop.alt.verb ? cop.alt.busy : cop.alt.label, title: `${cop.alt.label} ${cop.alt.then}.`,
+          disabled: !!busy || !rv, onClick: () => decide(cop.alt.verb) }] : []),
+        ...(card.tid && !nav.also?.length ? [{ verb: "finish", label: busy === "finish" ? "Closing…" : "Mark done",
           title: "Marks the task done, dismisses the draft, and ends any live agent session. No reply is sent.",
-          disabled: !!busy || !rv, onClick: finish }] : []}
+          disabled: !!busy || !rv, onClick: finish }] : [])]}
         where={<Where card={card} onOpenTask={onOpenTask} onTimeline={onTimeline} />} />
     </CardShell>
   );
@@ -523,6 +576,8 @@ export function AgentCard({ card, onDone, onOpenTask }) {
   };
   const working = card.lane === "working";
   const who = chat ? "assistant" : "agent";
+  const state = working ? `${card.working || card.agent || who} is back at it - nothing for you until it stops.` : card.paused ? `${card.working || card.agent || who} was saved after Taskuary stopped - ready to resume.`
+    : (card.choices || []).length && card.request_id ? says(subState(card), card.working || card.agent || who) : card.why || says(subState(card), card.working || card.agent || who);
   const worker = useFetched(!chat && card.tid ? `/api/tasks/${card.tid}/worker` : null, card.presentation_revision);
   const lastSaid = String(worker?.said || "").trim();
   const resume = async () => {
@@ -541,9 +596,11 @@ export function AgentCard({ card, onDone, onOpenTask }) {
     // who wants what, for an agent: ONE sentence for the state (laneSays) as the lead - when the
     // question and its choices are drawn below, the bare form here - and the task under it
     <CardShell card={card} kicker={working ? "agent working" : card.paused ? "agent stopped" : `the ${who} ${KICK[subState(card)]}`}
-      lead={<Lead text={working ? `${card.working || card.agent || who} is back at it - nothing for you until it stops.` : card.paused ? `${card.working || card.agent || who} was saved after Taskuary stopped - ready to resume.`
-        : (card.choices || []).length && card.request_id ? says(subState(card), card.working || card.agent || who) : card.why || says(subState(card), card.working || card.agent || who)} who={card.working || card.agent} />}
-      sub={card.paused ? null : card.title} err={err}>
+      lead={card.paused || !card.tid ? <Lead text={state} who={card.working || card.agent} /> : <TaskLead card={card} did />}
+      sub={card.paused ? null : card.tid ? null : card.title} err={err}>
+      {/* the three parts (AgentDid): what triggered it leads, then the agent - its state, and what it did so far */}
+      {!card.paused && !!card.tid && <Lead text={state} who={card.working || card.agent} />}
+      <AgentDid card={card} who={card.working || card.agent} />
       {card.paused && card.tid && <CombinedTaskText card={card} list={false} />}
       {/* THE SCREEN FOLDED: what the agent said last, in the card's box - the question it is waiting on
           was only on the screen, so folding it hid the one thing to answer (2026-09-23) */}
@@ -684,8 +741,8 @@ export function AgentDoneCard({ card, onOpenTask, onDone, onSurface }) {
   }, [open, card.tid, card.presentation_revision]);
   const show = () => setOpen((o) => !o);
   return (
-    <CardShell card={card} kicker="agent finished" lead={<Lead text={`${card.who || "The agent"} finished ${card.title}.`} who={card.who} />} err={err}>
-      {card.summary && !open && <div className="tq-card-excerpt">{card.summary}</div>}
+    <CardShell card={card} kicker="agent finished" lead={<TaskLead card={card} did />} err={err}>
+      {!open && <AgentDid card={card} who={card.who} text={card.summary || "finished it, with no summary - the final report says what it found."} />}
       {open && <div className="tq-card-full">{report === null ? "…" : looksMd(report) ? <Md text={report} /> : report}</div>}
       <button type="button" className="tq-card-more" onClick={show}>{open ? "Less" : "More - show the final report"}</button>
       {/* its agent already closed the task: "Close the task" on it asked for what was done (the owner, 2026-09-24) */}
@@ -702,35 +759,30 @@ export function AgentDoneCard({ card, onOpenTask, onDone, onSurface }) {
 }
 
 // the assistant's own line: the slipped ask, the promise, the thread gone quiet
-export function IdeaCard({ card, onAct, onOpenTask, onTimeline, onNavigate }) {
+export function IdeaCard({ card, onOpenTask, onTimeline, onNavigate }) {
   const a = card.action || {};
-  const [busy, setBusy] = useState("");
-  const [err, setErr] = useState("");
+  const [err] = useState("");
   const words = { followup: "waiting on them", promise: "you promised", asked: "slipped", cold: "gone quiet", idea: "worth a thought",
                   connect: "worth connecting", health: "needs a look" };
   // THE REPORT PROPOSES, THE CARD HAS THE DOORS (the assistant-runs-the-app design, 2026-09-18): a
   // system to connect opens its card on the Connections tab; a health finding opens the tab that fixes
-  // it. "Not for us" is the plain done verb - the idea's key is remembered and it never comes back.
+  // it. Putting it down is the chips' Not ours, the same word every idea carries (C5, 2026-09-27).
   const go = (tab, hash) => { if (hash) window.location.hash = hash; onNavigate?.(tab); };
-  const nav = React.useContext(CardNav);
   return (
     <CardShell card={card} kicker={words[card.idea_kind] || "slipped"} title={card.title} err={err}>
       {card.why && <div className="tq-card-excerpt">{card.why}</div>}
       <Foot
         verb={card.idea_kind === "connect" && a.connector_type ? (
           <Button size="small" variant="contained" disableElevation sx={primary}
-            onClick={() => go("Connections", `connector=${a.connector_type}`)}>{a.planned ? `Vote for ${a.title || a.connector_type}` : `Connect ${a.title || a.connector_type}`}</Button>
+            onClick={() => go("Connections", `connector=${a.connector_type}`)}>{a.planned ? `See ${a.title || a.connector_type}` : `Connect ${a.title || a.connector_type}`}</Button>
         ) : card.idea_kind === "health" && a.tab ? (
           <Button size="small" variant="contained" disableElevation sx={primary} onClick={() => go(a.tab, a.hash || "")}>Open {a.tab}</Button>
         ) : null}
-        then={card.idea_kind === "connect" && a.connector_type ? <><b>{a.planned ? "Vote" : "Connect"}</b> opens its card on Connections - nothing changes until you finish there.</>
+        then={card.idea_kind === "connect" && a.connector_type ? <><b>{a.planned ? "See" : "Connect"}</b> opens its card on Connections - nothing changes until you finish there.</>
           : card.idea_kind === "health" && a.tab ? <><b>Open {a.tab}</b> takes you to the tab that fixes it.</>
           // the buttons are the short way; saying it is the real one (2026-09-04: "all the ideas
           // should just say it and I will create it")
           : "Say what you want done with it and I'll create it."}
-        extra={(card.idea_kind === "connect" || card.idea_kind === "health") && onAct && !nav.also?.length
-          ? [{ verb: "seen", label: card.idea_kind === "connect" ? "Not for us" : "Seen",
-               onClick: () => onAct(card.idea_kind === "connect" ? "Not for us - remembered." : "Seen.") }] : []}
         where={<Where card={{ ...card, tid: a.tid || card.tid, mid: a.mid || card.mid }} onOpenTask={onOpenTask} onTimeline={onTimeline} />} />
     </CardShell>
   );
@@ -898,8 +950,8 @@ export function TaskCard({ card, onDone, onOpenTask }) {
   };
   return (
     <CardShell card={card} kicker={idle ? "waiting to start" : "the task you asked about"}
-      lead={<TaskLead card={card} />} sub={assistantFocus(card).lead || card.why} err={err}>
-      {card.summary && <div className="tq-card-excerpt">{card.summary}</div>}
+      lead={<TaskLead card={card} did={!!card.summary} />} sub={assistantFocus(card).lead || card.why} err={err}>
+      <AgentDid card={card} />
       {idle && card.why_idle && <div className="tq-card-excerpt"><b>Why it has not started:</b> {card.why_idle}</div>}
       {!idle && <TextField fullWidth multiline minRows={1} maxRows={4} value={text} onChange={(e) => setText(e.target.value)}
         placeholder="Leave a note — it is typed in when the agent next stops"
@@ -996,9 +1048,9 @@ export function WrapupCard({ card, onDone, onOpenTask }) {
     setBusy(false);
   };
   return (
-    <CardShell card={card} kicker="reply sent · task still open" title={card.title} sub={card.why} err={err}>
-      {card.sent && <div className="tq-card-excerpt">You sent: {card.sent}</div>}
-      {card.summary && <div className="tq-card-excerpt">The agent: {card.summary}</div>}
+    <CardShell card={card} kicker="reply sent · task still open" lead={<TaskLead card={card} did />} sub={card.why} err={err}>
+      <AgentDid card={card} />
+      {card.sent && <div className="tq-card-excerpt"><b>You sent:</b> {card.sent}</div>}
       <Foot covers={["close"]}
         verb={<Button size="small" variant="contained" disableElevation disabled={busy} onClick={close} sx={primary}>{busy ? "Closing…" : "Mark done"}</Button>}
         then={<><b>Mark done</b> ends {card.ref} - it stops coming back to Work.</>}

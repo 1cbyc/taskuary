@@ -1,7 +1,7 @@
 """Config writer tests - the UI persists agents/settings, so save() must round-trip
 exactly through stdlib tomllib.
 """
-import os, unittest
+import os, socket, unittest
 from unittest import mock
 try: import tomllib
 except ImportError: import tomli as tomllib
@@ -35,6 +35,17 @@ class TomlTests(unittest.TestCase):
             cfg = config.load()
         self.assertEqual((cfg['server']['host'], cfg['server']['port'], cfg['server']['token']),
                          ('0.0.0.0', 9000, 'abc'))
+
+    def test_invalid_env_port_is_ignored(self):
+        for value in ('abc', '0', '70000'):
+            with self.subTest(value=value), mock.patch.dict(os.environ, {'TASKUARY_PORT': value}, clear=True):
+                self.assertEqual(config._env_server(), {})
+
+    def test_cli_rejects_port_outside_socket_range(self):
+        with mock.patch('sys.argv', ['taskuary', '--port', '70000']):
+            with self.assertRaises(SystemExit) as stopped:
+                cli.main()
+        self.assertEqual(stopped.exception.code, 2)
 
     def test_env_overrides_do_not_persist_on_agent_save(self):
         """Runtime overlays must not round-trip through save() — that's how Docker was
@@ -91,6 +102,16 @@ class TomlTests(unittest.TestCase):
         self.assertEqual(cli.public_url('::', 7787), 'http://127.0.0.1:7787')
         self.assertEqual(cli.public_url('127.0.0.1', 7787), 'http://127.0.0.1:7787')
         self.assertEqual(cli.public_url('10.0.0.5', 9000), 'http://10.0.0.5:9000')
+        self.assertEqual(cli.public_url('::1', 7787), 'http://[::1]:7787')
+        try:
+            with socket.socket(socket.AF_INET6) as s:
+                s.bind(('::1', 0))
+                port = s.getsockname()[1]
+                self.assertFalse(cli._busy('::1', port))
+                s.listen(1)
+                self.assertTrue(cli._busy('::1', port))
+        except OSError:
+            pass
 
 
 if __name__ == '__main__':

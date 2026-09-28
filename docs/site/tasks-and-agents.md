@@ -1,17 +1,17 @@
-A task in Taskuary is three records, not one: the durable job, the agent work done on it, and the
-reply to whoever asked. They start and finish independently, and keeping them apart is what stops
+A task in Taskuary is three records, not one: the durable job, the agent work done on it, and how it
+is closed out - the reply to whoever asked, and on GitHub the merge or the closed issue. They start and finish independently, and keeping them apart is what stops
 the word "done" meaning three different things.
 
 ## A task's three lives
 
-The task page shows them as one numbered workflow — **1 Task → 2 Agent work → 3 Reply** — and
+The task page shows them as one numbered workflow — **1 Task → 2 Agent work → 3 Close out** — and
 each stage owns exactly one state badge.
 
 | Part | What it records | Main controls | What it never does by itself |
 |---|---|---|---|
 | **Task** | The durable job and who owns it | owner, kind, priority, Reopen, Mark done | Starting or ending an agent session does not complete it |
 | **Agent work** | One or more attempts by a coding or non-coding agent, plus the saved result | harness, model, new prompt, start, prompt, pause, finish, stop | Stopping does not mark the task done or send a reply |
-| **Reply** | Communication with the person who asked | write, generate, edit, approve and send | Sending it marks the task done — unless an agent is still working or a new message came in |
+| **Close out** | The reply to the person who asked, and the last act where the task lives (merge its pull request, close its issue) | write, generate, edit; **Close out**, **Decline**, **Not yet** | Sending it marks the task done — unless an agent is still working, a new message came in, or its merge still waits |
 
 While a terminal or an assistant chat is live, the task collapses to a one-line context strip and
 the workspace takes most of the page. Full controls, saved results and restart choices come back
@@ -28,15 +28,37 @@ it leaves your work rail, and the "yours to end" mark comes off.
 | You or an agent does | What happens | Stays open when |
 |---|---|---|
 | **Mark done** — the task page, the Assistant's button or card, "done" or "close" in the chat, the phone | Mark done | never |
-| **Send the reply** | Sends it, then Mark done | an agent is still working on it, or a new message came in while you were answering — it says why |
+| **Close out** with a reply | Sends it, then Mark done | an agent is still working on it, or a new message came in while you were answering — it says why |
 | **Tick the last checklist box** | Mark done | an agent is still working on it |
 | **Hand it to a person** | Forwards it, then Mark done | never |
 | **Not ours** / **Not a task** | Deleted if nothing was done on it, otherwise Mark done | never |
 | **Mark done** on a channel that cannot send (the draft stays unsent) | Mark done | never |
-| **An agent says it is finished** (`taskuary --done`) | The session is written up; the task waits for you with the draft if a reply is owed, otherwise it is done | a reply is owed, or you opened the session yourself |
-| **Its pull request is merged or closed** | Same as an agent saying it is finished | a reply is owed |
+| **An agent says it is finished** (`taskuary --done`) | The session is written up; the task waits for you with its close-out (below) and the draft if a reply is owed, otherwise it is done | its close-out or a reply waits on you, or you opened the session yourself |
+| **Close out** on GitHub, or **Decline** | Merges or closes the pull request, or closes the issue, posts your reply, then Mark done | never |
+| **The pull request or issue it came from is merged or closed** | Same as an agent saying it is finished, with nothing owed | never |
 
 A task an agent or a merged pull request closed stays on your work rail until you have read it.
+
+### The close-out: what finishes it where it lives
+
+Mail is finished by the reply. A pull request is finished by merging it, and an issue by closing it. Whatever the
+system, the card has the same three buttons - only the line under them says what they do there:
+
+| Button | What it does |
+|---|---|
+| **Close out** | Finishes the task the normal way for its system, sends your reply with it, then Mark done |
+| **Decline** | Closes it without doing it, where the system has that difference - a pull request closed unmerged |
+| **Not yet** | Nothing happens; the task stays open and on you (in the Assistant's walk this is **Next**) |
+
+| The task's work is | The rail says | What **Close out** does there |
+|---|---|---|
+| A pull request the agent opened, or the one the task came from | ✉️ **ready to close out** | Merges it the way you set on the GitHub connection (a draft is marked ready first), then posts your reply as its comment. The card reads the pull request from GitHub first: when the repository's rules say it cannot merge yet it says why and offers what fits - **Update branch**, **Re-run checks**, or **Close out anyway** where you allowed it |
+| An issue the task came from | ✉️ **ready to close out** | Posts your reply as the closing comment and closes the issue |
+| Mail, chat, anything else | ✉️ **ready to close out** | Sends your reply |
+
+If the act is refused, nothing is sent. Merging or closing the pull request on GitHub yourself counts as answering
+it: the task closes by itself. The buttons are yours, so **Agents may push / deploy** does not have to be on - that
+switch is about what an agent may do. A task an agent finished before this existed gets its card on the next sync.
 A session you started yourself is yours to complete: the agent is told so, and if it says it is
 finished anyway its sentence is filed on the task and the task stays open until you mark it done.
 
@@ -84,7 +106,7 @@ Timeline, the task page, the Board, the assistant's cards and the phone all use 
 | 👋 | **agent waiting on you** | Running, and it asked you something, needs your approval, or is stuck | Answer it |
 | 💾 | **session saved** | You ended it with **Save and end session**; its report is written | **Continue session**, or **Mark done** |
 | ⏹ | **agent stopped** | It ended without finishing: a crash, a closed pane, Taskuary closing | **Continue session**, or hand it on |
-| ✅ | **agent finished** | The agent, or its merged pull request, closed the task | Read the result |
+| ✅ | **agent finished** | The agent closed the task, or the item it came from was merged or closed | Read the result |
 
 ![How an agent starts: handed off, auto-start allowed or not, a free slot or next in line](img/agent-start.svg "Waiting to start always says why.")
 
@@ -94,7 +116,7 @@ Timeline, the task page, the Board, the assistant's cards and the phone all use 
 
 | It ended because | What you see | What brings it back |
 |---|---|---|
-| The agent said it was done, or its pull request merged | ✅ **agent finished** - its reply ready for your yes if one is owed | a new message on it |
+| The agent said it was done | its **Close out** card if its work lives on GitHub, then ✅ **agent finished** - ready to close out if a reply is owed | a new message on it |
 | You pressed **Save and end session** | 💾 **session saved** - the report is written, the task stays open | **Continue session** |
 | You pressed **Mark done** | the task is closed and the agent stopped | they write again |
 | The session crashed or was closed, or Taskuary closed | ⏹ **agent stopped** - a reply it had held is back for your yes | **Continue session**, or **Run another agent** |
@@ -203,7 +225,7 @@ Both pages show the same state for a task, in the work rail's words — the serv
 | its agent is running | ⚙️ agent working | agent working |
 | its agent asked, needs approval, or is stuck | 👋 agent waiting on you | agent waiting on you |
 | you ended its session / it ended by itself | 💾 session saved / ⏹ agent stopped | saved or stopped — with **Continue session** |
-| a reply is drafted for your yes | ✉️ reply ready | agent finished, when an agent drafted it |
+| a reply or a close-out waits for your yes | ✉️ ready to close out | agent finished, when an agent drafted it |
 | its agent closed it | ✅ agent finished | agent finished (today) |
 | you closed it | ✅ done | — |
 | waiting on somebody else | 📤 waiting on them | — |
@@ -223,7 +245,7 @@ The rail beside the Assistant holds what still wants something from you - nothin
 | Heading | What lands there | Comes back to it |
 |---|---|---|
 | **Urgent** | A meeting starting within 15 minutes; an ask triage called urgent (a deadline today or tomorrow, someone blocked now); a sender on your escalate list | - |
-| **Your task** | A person's ask, a reply ready for your yes, an agent waiting on you, an agent waiting to start, an agent stopped or a session saved, a task waiting on somebody else (📤 waiting on them), a check that failed, a task an agent finished | Passed work after 3 hours |
+| **Your task** | A person's ask, a task ready to close out, an agent waiting on you, an agent waiting to start, an agent stopped or a session saved, a task waiting on somebody else (📤 waiting on them), a check that failed, a task an agent finished | Passed work after 3 hours |
 | **Passed** | Your work you pressed **Next** on - still yours, not offered again by the walk | - |
 | **Reports** | A report run that landed | - |
 | **FYI** | People told you things; rows whose triage failed | - |
