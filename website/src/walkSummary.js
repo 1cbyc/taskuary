@@ -9,7 +9,7 @@ export const GROUPS = [
   { key: "you", word: "You wanted" },
   { key: "agents", word: "Agents waiting" },
   { key: "read", word: "Nothing to decide" },
-  { key: "passed", word: "You passed" },
+  { key: "passed", word: "For later" },   // the rail's For later (the canvas redesign, 2026-09-29)
 ];
 
 const AGENT_LANES = new Set(["blocked", "stopped", "saved", "queued", "working", "broken", "unjudged"]);
@@ -19,7 +19,7 @@ export const groupOf = (i) => {
   if (!i) return "read";
   // what you walked past with Next sits in the rail's Passed band - here too, never back under "Agents waiting"
   // as if it were new (the owner, 2026-09-24: "now it's gone from work but in the good evening list")
-  if (levelOf(i) === "passed") return "passed";
+  if (levelOf(i) === "later") return "passed";
   if (i.kind === "action" || i.kind === "agent" || i.kind === "agentdone" || AGENT_LANES.has(i.lane)) return "agents";
   if (READ_LANES.has(i.lane) || ["fyis", "report", "idea", "wrapup"].includes(i.kind)) return "read";
   // what YOU made - a task born by hand or from the assistant. A person's ask triage filed as a to-do
@@ -51,7 +51,7 @@ export function summarize(items) {
   const word = live.length - ready - skip - yours - passed;
   const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
   const parts = [ready && `${n(ready, "is", "are")} ready - you only approve`, word && `${n(word, "needs", "need")} a word`,
-                 yours && `${yours} ${yours === 1 ? "is" : "are"} on your list`, skip && `${skip} you can skip`, passed && `${passed} you passed`].filter(Boolean);
+                 yours && `${yours} ${yours === 1 ? "is" : "are"} on your list`, skip && `${skip} you can skip`, passed && `${passed} for later`].filter(Boolean);
   const lead = live.length
     ? `${live.length} thing${live.length === 1 ? "" : "s"}. ${parts.join(", ").replace(/^./, (c) => c.toUpperCase())}.`
     : "Nothing is waiting on you.";

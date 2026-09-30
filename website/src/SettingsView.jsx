@@ -323,7 +323,8 @@ const PageHead = ({ page, first }) => (
 // SettingsView instead - two components apart, so the panel's "go to Connections" was a
 // ReferenceError waiting for a click. The scope test only tracks set* setters, so eslint's
 // no-undef is what caught it before it shipped.
-function SettingsPages({ q, setQ, onNavigate, onJump, onSections, docSel, setDocSel, onCatalog }) {
+// `only` (the assistant canvas): draw ONE page - and on Configuration, one group of it - instead of the whole document
+function SettingsPages({ q, setQ, onNavigate, onJump, onSections, docSel, setDocSel, onCatalog, only = null }) {
   const [policies, setPolicies] = useState(null);
   const [settings, setSettings] = useState([]);
   const [memory, setMemory] = useState([]);
@@ -622,8 +623,8 @@ function SettingsPages({ q, setQ, onNavigate, onJump, onSections, docSel, setDoc
       // by reading rather than by guessing which tab it was hiding on (the owner, 2026-09-18).
       return (
         <Box>
-          <AssistantChanges />
-          {cfgGroups.map((g) => (
+          {!only?.group && <AssistantChanges />}
+          {cfgGroups.map((g) => (only?.group && g !== only.group ? null :
             <Box key={g} sx={{ mb: 4.5 }}>
               <SectionHead page="config" name={g} />
               {panels[g]}
@@ -842,9 +843,10 @@ function SettingsPages({ q, setQ, onNavigate, onJump, onSections, docSel, setDoc
   return (
     <Box>
       {err && <Alert severity="error" onClose={() => setErr("")} sx={{ mb: 1.5 }}>{err}</Alert>}
-      {NAV.map((k, i) => (
+      {/* ...or, on the assistant canvas, the one page it opened (`only`), without its heading - the canvas's frame says it */}
+      {NAV.map((k, i) => (!only || only.page === k) && (
         <React.Fragment key={k}>
-          <PageHead page={k} first={!i} />
+          {!only && <PageHead page={k} first={!i} />}
           {body(k)}
         </React.Fragment>
       ))}
@@ -886,7 +888,9 @@ const sameSel = (a, b) => !!a && !!b && (a.action || "") === (b.action || "")
   && (a.group || "") === (b.group || "") && (a.doc || "") === (b.doc || "");
 const RAIL = 236, GUTTER = 24;   // the rail's own width, and the grid gap beside it
 
-export default function SettingsView({ onNavigate }) {
+// `browse` (the assistant canvas, CanvasBrowse.jsx): the pages are the sections, Configuration's groups its cards, and one
+// group (or one page) opens with its own controls - drawn through the canvas's frame instead of this tab's rail.
+export default function SettingsView({ onNavigate, browse = null, browseState = {}, onBrowseState = null }) {
   const [page, setPage] = useState(NAV[0]);      // the rail's first entry is where Settings opens - About you
   // Docs' rail entries switch the document, so the selection belongs here beside `page` - and the
   // catalog they draw comes from DocsView, which already fetches and derives both lists.
@@ -999,6 +1003,59 @@ export default function SettingsView({ onNavigate }) {
     const want = g ? decodeURIComponent(g[1]) : "";
     goTo(m[1], (SECTIONS[m[1]] || []).includes(want) ? want : "");
   }, [goTo]);
+
+  if (browse) {
+    // a page or a group this install does not have (an old link) opens the list, and says why - never a crash or a blank card
+    const section = PAGES[browseState.section] ? browseState.section : null;
+    const gone = section === "config" && browseState.open && !GROUPS.includes(browseState.open);
+    const knobsIn = (g) => Object.values(schema.knobs || {}).filter((k) => k.group === g).length;
+    // SEARCH, as the tab had it: a setting you half remember is found by its words, and opens the group it lives in
+    const needle = q.trim().toLowerCase();
+    const hits = needle ? Object.entries(schema.knobs || {}).filter(([k, m]) => `${k} ${m.label || ""} ${m.desc || ""}`.toLowerCase().includes(needle)) : [];
+    // DOCS IS A SHELF OF FILES, not one page (the owner, 2026-09-29: "I don't see the rest of the docs ... we need sub
+    // settings to see all the files soul.md/counsel"): the same tree the tab's rail drew - the operator documents, the
+    // profiles, the playbooks and their New / Manage entries, How it works - each a card that opens that document
+    let shelf = "";
+    const docCards = docsTree(docCat).flatMap((e) => {
+      if (e.head && e.key !== "g:how") { shelf = e.label; return []; }
+      return [{ key: e.key, title: e.label, sub: e.key === "g:how" ? "the assistant and the gates a message passes" : shelf, sel: e.sel }];
+    });
+    const cards = needle ? hits.map(([k, m]) => ({ key: m.group, title: m.label || k, sub: `${m.group} · ${m.desc || ""}`, section: "config" }))
+      : section === "config" ? GROUPS.map((g) => ({ key: g, title: g, sub: `${knobsIn(g) || "its own panel"}${knobsIn(g) ? " settings" : ""}` }))
+      : section === "docs" ? docCards
+      : section ? [{ key: section, title: PAGES[section].title, sub: PAGES[section].desc }] : [];
+    const open = gone || !section ? null : browseState.open;
+    return browse({
+      title: "Settings",
+      summary: "how Taskuary works for you · pick a section",
+      sections: NAV.map((k) => ({ key: k, label: PAGES[k].title })),
+      section: needle ? "" : section,
+      onSection: (key) => { setQ(""); onBrowseState?.({ section: key, open: null }); },
+      cards: cards.map((c, i) => ({ ...c, key: needle ? `${c.key}-${i}` : c.key,
+        onOpen: () => {
+          setQ("");
+          // a document is picked the way the rail picked it; an action entry (New playbook) is a one-shot, so it carries a nonce
+          if (c.sel) { const e = c; setDocSel(e.sel.action ? { ...e.sel, n: Date.now() } : e.sel); }
+          onBrowseState?.({ ...browseState, section: c.section || section, open: c.key });
+        } })),
+      search: (
+        <TextField fullWidth size="small" placeholder="Search settings…" value={q} onChange={(e) => setQ(e.target.value)}
+          inputProps={{ "aria-label": "Search settings", "data-tq-browse-search": "" }}
+          InputProps={{ startAdornment: <InputAdornment position="start"><SearchIcon sx={{ fontSize: 17, color: FAINT }} /></InputAdornment> }}
+          sx={{ mt: 1.5, bgcolor: "#fff", borderRadius: 2 }} />
+      ),
+      // what the assistant changed here, and the way to undo it - the tab drew it over Configuration
+      tools: section === "config" && !open && !needle ? <Box sx={{ mt: 1.5 }}><AssistantChanges /></Box>
+        // the shelf's profiles and playbooks come from DocsView's own reads - mounted unseen, as the tab's rail had it
+        : section === "docs" && !open ? <Box sx={{ display: "none" }}><DocsView onCatalog={onCatalog} /></Box> : null,
+      detail: open ? <SettingsPages only={{ page: section, group: section === "config" ? open : null }} q="" setQ={() => {}} onNavigate={onNavigate}
+        onJump={() => {}} onSections={setCfgSecs} docSel={docSel} setDocSel={setDocSel} onCatalog={onCatalog} /> : null,
+      onBack: () => onBrowseState?.({ ...browseState, open: null }),
+      openLabel: !open ? "" : section === "docs" ? `the document "${docCards.find((c) => c.key === open)?.title || "Docs"}" (Settings - Docs)`
+        : `the settings group "${section === "config" ? open : PAGES[section]?.title}" (Settings)`,
+      note: gone ? `“${browseState.open}” is not a settings group any more - here are the ones there are.` : "",
+    });
+  }
 
   return (
     // THE BLOCK IS CENTRED, NOT THE PAGE INSIDE IT. Capping the page's width while the grid around

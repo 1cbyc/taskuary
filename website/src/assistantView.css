@@ -8,7 +8,7 @@
    dot, the card 8px in - so the pipe reads as the top of the same list, ranked instead of dated.
    What comes out next is the FIRST row; the walls and the taper are gone (the owner, 2026-09-03:
    "no more funnel... everything comes out from the top"). */
-.tq-pile { position: relative; padding: 4px 0 8px; }
+.tq-pile { position: relative; padding: 12px 0 8px; }
 /* how close the pipe is to empty - said once the count is small enough to be encouraging */
 .tq-pile-cheer { text-align: center; color: #6e685f; font: 600 10.5px 'IBM Plex Sans', system-ui, sans-serif; padding: 10px 0 2px; }
 .tq-pile-note { text-align: center; color: #8a847a; font: 500 10px 'IBM Plex Sans', system-ui, sans-serif; padding: 3px 0; }
@@ -38,9 +38,9 @@
 /* one tint per band, all quiet: the band says what KIND of thing sits under it at a glance, and only urgent is loud */
 .tq-pile-head span.lvl-urgent { color: #7a2f3c; background: #f4e3e6; border-color: #e3c1c7; }
 .tq-pile-head span.lvl-task, .tq-sum-head span.lvl-people, .tq-sum-head span.lvl-you, .tq-sum-head span.lvl-agents { color: #86505b; background: #f8eff0; border-color: #ecdade; }
-.tq-pile-head span.lvl-reports { color: #6b5f45; background: #f3eee2; border-color: #e3d9c3; }
+.tq-pile-head span.lvl-reports, .tq-pile-head span.lvl-ideas { color: #6b5f45; background: #f3eee2; border-color: #e3d9c3; }
 .tq-pile-head span.lvl-fyi, .tq-sum-head span.lvl-read { color: #6e685f; background: #f3efe8; border-color: #e2dbcf; }
-.tq-pile-head span.lvl-passed, .tq-sum-head span.lvl-passed { color: #8a847a; background: #faf8f4; border: 1px dashed #d8d0c3; }
+.tq-pile-head span.lvl-later, .tq-sum-head span.lvl-passed { color: #8a847a; background: #faf8f4; border: 1px dashed #d8d0c3; }
 .tq-pile-head span.lvl-agents { color: #41525f; background: #edf1f4; border-color: #d3dbe2; }
 .tq-pile-head hr { flex: 1 1 auto; border: 0; border-top: 1px solid #ece7e0; margin: 0; }
 .tq-pile-rank { flex-shrink: 0; font: 600 13px/1 'IBM Plex Sans', system-ui, sans-serif; color: #41525f; margin-left: -2px; }
@@ -111,7 +111,9 @@
    (FeedView), and the two rails are the same list read two ways, so they read at one size. And the
    palette's INK, not the darker-than-INK grey this had: #191814 was a shade invented for this one
    rule, and the whole point of theme.jsx is that nothing invents its own. */
-.tq-pile-row .t b { flex: 1 1 auto; min-width: 0; font-size: 11.5px; font-weight: 500; color: #262521; letter-spacing: -.1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* the narrowed sidebar (2026-09-29): the TITLE keeps at least half the row and the lane word gives way first, down to its
+   mark - "did t..." beside a whole "ready to close out" had it backwards; the word is in the row's tooltip */
+.tq-pile-row .t b { flex: 1 1 auto; min-width: 50%; font-size: 11.5px; font-weight: 500; color: #262521; letter-spacing: -.1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 /* which task a row is. Sans, not mono - the rail carries no mono anywhere - and quiet enough that
    the subject still leads the line. */
 .tq-pile-ref { flex: 0 0 auto; font: 600 9.5px 'IBM Plex Sans', system-ui, sans-serif; color: #a09889; letter-spacing: .02em; }
@@ -139,8 +141,9 @@
 .tq-stage-mode { display: inline-flex; border: 1px solid #ddd6cb; border-radius: 99px; overflow: hidden; flex: 0 0 auto; }
 .tq-stage-mode button { border: 0; background: transparent; padding: 4px 10px; font: 600 10.5px 'IBM Plex Sans', system-ui, sans-serif; color: #6e685f; cursor: pointer; white-space: nowrap; }
 .tq-stage-mode button.on { background: #eae4d8; color: #55697a; }
-.tq-chat-body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px 8px; scroll-behavior: smooth; }
-.tq-chat-inner { width: min(900px, 100%); margin: 0 auto; }
+/* a SIZE container: the item on the table is as tall and as wide as this body (100cqh / 100cqw), in CSS, always current */
+.tq-chat-body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px 8px; scroll-behavior: smooth; container-type: size; }
+.tq-chat-inner { width: min(980px, 100%); margin: 0 auto; }
 .tq-msg { display: grid; grid-template-columns: 28px minmax(0, 1fr); column-gap: 10px; margin-bottom: 16px; }
 .tq-msg .avatar { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; box-sizing: border-box;
   border: 1.5px solid #7d9a7c; background: #fffdf9; color: #526b53; }
@@ -421,4 +424,35 @@
   .tq-msg.you .body { max-width: 92%; }
   .tq-chat-body { padding: 12px 12px 6px; }
   .tq-compose, .tq-btw, .tq-handed { padding-left: 12px; padding-right: 12px; margin-left: 12px; margin-right: 12px; }
+}
+
+/* THE NARROWED SIDEBAR (the canvas redesign, 2026-09-29): a row under 300px wide says its lane by its MARK alone - the
+   word is in the row's tooltip - so the title keeps the room; a wider rail still spells it out */
+.tq-pile-row .card { container-type: inline-size; }
+@container (max-width: 300px) { .tq-pile-word .w { display: none; } .tq-pile-word i { margin-right: 0; } }
+
+/* ── the canvas (the canvas redesign, 2026-09-29) ─────────────────────────────────────────────── */
+/* the item on the table: the Tasks tab's task view, full width of the conversation, the body's own height */
+.tq-canvas-live { margin: 0 0 12px; }
+/* Expand: the view alone, the conversation around it hidden - its own box never changes size (CanvasItem) */
+.tq-chat-inner.expanded > :not(.tq-canvas-live) { display: none; }
+/* NOT a padding change: the task view is sized off this body (100cqh), so a smaller padding here grew the pane on Expand */
+/* an earlier item, folded to its title line - click it and it is back on the table */
+.tq-fold { display: flex; align-items: center; gap: 10px; width: 100%; box-sizing: border-box; margin-top: 2px; padding: 8px 14px;
+  border: 1px solid #e1dcd5; border-radius: 10px; background: #fffdfb; font: 400 12px 'IBM Plex Sans', system-ui, sans-serif;
+  color: #6e685f; text-align: left; cursor: pointer; }
+.tq-fold:hover { border-color: #cbd4dc; }
+.tq-fold .ref { flex-shrink: 0; font-size: 9.5px; font-weight: 600; color: #a09889; letter-spacing: .02em; }
+.tq-fold b { min-width: 0; font-weight: 600; color: #2f3a42; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tq-fold .grow { flex: 1; }
+.tq-fold .again { flex-shrink: 0; font-size: 11px; }
+/* a browse card sits in the conversation at the canvas's width, like the task view */
+.tq-browse-line { margin: 0 0 14px; }
+/* SEE MORE IN ONE SCREEN (the owner, 2026-09-29: "fill up more width and more height for tasks ... same for all items"): the
+   item on the table, any live walk card and a browse card span the canvas's whole width, not the chat's reading column;
+   ordinary lines keep the column. Centred by margin, never a transform - a transform would capture the phone's pinned
+   (position: fixed) task view. */
+@media (min-width: 1100px) {   /* narrower, the reading column already is the canvas's width */
+  .tq-chat-inner > .tq-canvas-live, .tq-chat-inner > .tq-browse-line, .tq-chat-inner > .tq-live-card {
+    width: calc(100cqw - 40px); margin-left: calc((100% - (100cqw - 40px)) / 2); max-width: none; }
 }

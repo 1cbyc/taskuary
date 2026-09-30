@@ -1,3 +1,4 @@
+import { taskSource } from "./taskSource.mjs";
 /* The Board is the agent floor.
  *
  * "board is only for things that hit agents correct? it should not take up our agent capactity"
@@ -53,10 +54,11 @@ test("the wall is deliberately NOT filtered", () => {
 });
 
 test("every task row says who works it, in the owner's words", () => {
-  const text = src("TasksView.jsx");
+  const text = taskSource();
   for (const label of ["your task", "agent · general", "agent · coding", "reply"]) {
     assert.ok(text.includes(label), `the kind vocabulary is missing ${label}`);
   }
-  // "your task" is the work rail's own heading for band 2: one thing, one name in both places
-  assert.ok(src("funnelPile.js").includes('word: "your task"'), "the rail no longer says 'your task'");
+  // the work rail's heading for band 2 is "on you" since the canvas redesign (2026-09-29) - the same words the
+  // lane itself says on a row (lanes.json `yours`), so the heading and the row cannot disagree
+  assert.ok(src("funnelPile.js").includes('word: "on you"'), "the rail's band-2 heading is not 'on you'");
 });

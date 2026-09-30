@@ -347,6 +347,13 @@ def task_now(store, tid: int) -> str:
     rv = store.pending_review(tid)
     last = next((c for c in reversed(store.list_comments(tid)) if c.get('ActorType') in ('agent', 'assistant_agent')), None)
     lines = [f"TASK NOW: {task_ref(tid)} [{t.get('Status')}, {t.get('Kind')}] {t.get('Title') or ''} - {state}"]
+    # ...and WHAT ITS SCREEN SAYS, so "what is it doing?" is answered from the work, not from a status word - the canvas
+    # shows the agent's session beside the chat, and the assistant relays both ways about the thing on screen (2026-09-29)
+    if live and live.get('sid'):
+        from . import terminal as _term
+        try: screen = [str(l) for l in _term.asking_lines(live['sid'], 8) if str(l).strip()]
+        except Exception: screen = []
+        if screen: lines.append("THE AGENT'S SCREEN, last lines:\n" + '\n'.join(f'  {_cut(l, 200)}' for l in screen))
     sent = store.sent_reply(task_id=tid)
     if sent: lines.append(f"  YOU ALREADY REPLIED ({str(sent.get('DecidedAt') or sent.get('CreatedAt') or '')[:16]}): {_cut(sent.get('FinalText') or sent.get('DraftText'), 240)} - do not suggest answering again")
     if rv: lines.append(f"  a {rv.get('Kind')} waits for the owner's yes (rv{rv['ReviewId']})")
@@ -2713,7 +2720,8 @@ def _chat_proposed(store, dock_tid: int, oid: str) -> bool:
     return False
 
 
-def say(store, text: str, key: str = None, llm=None, actor: str = 'owner', trace=None, cancel=None, item: dict | None = None) -> dict:
+def say(store, text: str, key: str = None, llm=None, actor: str = 'owner', trace=None, cancel=None, item: dict | None = None,
+        open_card: str | None = None) -> dict:
     """The owner's words, answered briefly - about the item on the table when there is one. The MODEL interprets
     them (PW-121): a question is answered, a subject named is pulled in, and a decision becomes a PROPOSAL the
     owner confirms (PW-123/124) - except Next, which moves the walk and marks nothing, and a reply request, which
@@ -2754,6 +2762,9 @@ def say(store, text: str, key: str = None, llm=None, actor: str = 'owner', trace
         raw = str(llm(system,
                       f"NOW: {datetime.now().strftime('%A %d %B %H:%M')}\n{funnel.summary(p['items'], coming=False)}\n\n{facts(store, item)}\n\n"
                       + (f"CONVERSATION SO FAR:\n{_turns(store, tid)}\n\n" if _turns(store, tid) else '')
+                      # THE CARD BROWSED OPEN in the canvas (the canvas redesign, 2026-09-29): "this", "it", "set it up"
+                      # mean that card - a connector, a settings group, a report - when no item is on the table
+                      + (f"ON SCREEN NOW: {_cut(open_card, 300)} - 'this' means that card; its own operations set it up\n\n" if open_card and not item else '')
                       + f"The owner says: {text}\nAnswer them, briefly. If a look-up would answer it, CALL it now instead of saying you will. "
                       + ('If this is a decision about the item on the table, CALL it (bucket table).' if item else
                          'If they ask for something to be done, CALL it now - the card is their confirmation.'),

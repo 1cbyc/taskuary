@@ -802,6 +802,42 @@ def _band(item):
                           result=lane == 'report')
 
 
+# THE RAIL'S SECTIONS, said once for the server (website/src/funnelPile.js levelOf is the page's copy, and
+# tests/fixtures/rail_levels.json holds both to the same answers). The canvas redesign (2026-09-29) walks a section
+# by its heading, and the phone doorway offers the same sections as picks - so the walk and the rail must agree on
+# which row is in which: For later is work walked past with Next or put away with Remind me; Advisor ideas is an
+# idea still only an idea (made a task, it is work like any other).
+SECTION_WORDS = {'urgent': 'Urgent', 'task': 'On you', 'agents': 'Agents working', 'later': 'For later',
+                 'reports': 'Reports', 'ideas': 'Advisor ideas', 'fyi': 'FYI'}
+_LEVEL_OF_BAND = {1: 'urgent', 2: 'task', 3: 'reports', 4: 'fyi', 5: 'agents'}
+# the page's fallback for a row that carries no band (funnelPile.attentionBand) - kept identical, never _band's
+_BAND_FALLBACK = {'blocked': 2, 'time': 1, 'approve': 2, 'broken': 2, 'asked': 2, 'yours': 2, 'queued': 2, 'stopped': 2,
+                  'saved': 2, 'forgotten': 4, 'report': 3, 'fyi': 4, 'working': 5}
+
+
+def level_of(item: dict) -> str:
+    band = item.get('order_band')
+    if not (isinstance(band, int) and 1 <= band <= 5):
+        if item.get('kind') == 'meeting' and (item.get('calendar_ready') is False or (item.get('mins') or 0) > 15): band = 2
+        elif item.get('kind') == 'agentdone': band = 2
+        else: band = _BAND_FALLBACK.get(item.get('lane'), 2)
+    if band == 2 and (item.get('surfaced') or item.get('deferred')): return 'later'
+    if band == 4 and item.get('kind') == 'idea': return 'ideas'
+    return _LEVEL_OF_BAND.get(band, 'fyi')
+
+
+def section_next(items: list, section: str, seen=()) -> dict | None:
+    """The next row of one section, in the rail's own order: what clicking its heading, then Next, walks. A row
+    still being triaged is not ready; a row already walked in this pass is not offered twice."""
+    seen = set(seen or ())
+    return next((i for i in items or [] if level_of(i) == section and not i.get('settling')
+                 and i.get('key') not in seen and not seen.intersection(i.get('aliases') or [])), None)
+
+
+def section_done(section: str) -> str:
+    return f"{SECTION_WORDS.get(section, section)} done."
+
+
 def _activity_time(value):
     """Stored-local compatibility, retaining subseconds and explicit offsets."""
     try:
@@ -824,7 +860,15 @@ def _order(items: list) -> list:
     return sorted(items, key=key)
 
 
-def _apply_states(items: list, states: dict, now: datetime, keep_surfaced: bool = False) -> list:
+_LATER_LANES = ('yours', 'theirs', 'asked', 'approve', 'blocked', 'queued', 'broken', 'stopped', 'saved')
+
+
+def _ts_dt(value):
+    try: return datetime.strptime(str(value)[:19].replace('T', ' '), '%Y-%m-%d %H:%M:%S')
+    except ValueError: return None
+
+
+def _apply_states(items: list, states: dict, now: datetime, keep_surfaced: bool = False, quiet: int = 180) -> list:
     """Apply the owner's decisions to the assistant's work queue.
 
     A surfaced row is read and the feed's Unread view removes it. Unresolved approvals and agent
@@ -839,7 +883,12 @@ def _apply_states(items: list, states: dict, now: datetime, keep_surfaced: bool 
             # done is for good - except on a CONDITION whose error has changed since (a broken connection's
             # sig): that is a new failure, not the one put down
             if st['Status'] == 'done' and not (i.get('kind') == 'connection' and st.get('Note') and st['Note'] != i.get('sig')): continue
-            if st['Status'] in ('later', 'skip') and (not st.get('Until') or _ts(st['Until']) > stamp): continue
+            if st['Status'] in ('later', 'skip') and (not st.get('Until') or _ts(st['Until']) > stamp):
+                # FOR LATER (the canvas redesign, 2026-09-29): an open task put away stays on the rail, saying its day -
+                # never offered by the walk before it (next_item skips `deferred`)
+                if i.get('tid') and st.get('Until') and i['lane'] in _LATER_LANES:
+                    out.append(i | {'deferred': True, 'defer_until': st['Until'], 'back_at': st['Until']})
+                continue
             if st['Status'] == 'surfaced':
                 # shown, but CHANGED since - the agent rewrote the draft, the question moved on: new again
                 if i.get('sig') and st.get('Note') and st['Note'] != i['sig']:
@@ -848,8 +897,12 @@ def _apply_states(items: list, states: dict, now: datetime, keep_surfaced: bool 
                 if i.get('kind') == 'connection': continue
                 # Read is gone from the ordinary queue. Only unresolved work that is still on the
                 # owner (a draft/approval or an agent question) remains addressable and marked.
-                if not keep_surfaced and i['lane'] not in ('blocked', 'approve', 'working'): continue
+                # ...and open work walked past waits in For later until the quiet hours bring it back (2026-09-29)
+                back = (_ts_dt(st.get('At')) + timedelta(minutes=quiet)) if st.get('At') else None
+                later = bool(i.get('tid') and i['lane'] in _LATER_LANES and back and back > now)
+                if not keep_surfaced and i['lane'] not in ('blocked', 'approve', 'working') and not later: continue
                 i = i | {'surfaced': True, 'surfaced_at': st.get('At')}
+                if back and i['lane'] != 'working': i = i | {'back_at': back.strftime('%Y-%m-%d %H:%M:%S')}
                 # an fyi's shown-state note is the summary the assistant wrote for it (PW-151); a sig'd item's note is its sig
                 if i.get('lane') == 'fyi' and not i.get('sig') and st.get('Note'): i = i | {'summary': st['Note']}
         out.append(i)
@@ -998,12 +1051,14 @@ def build(store, now: datetime = None, keep_surfaced: bool = False,
     seen = set(); items = [i for i in items if not (i['key'] in seen or seen.add(i['key']))]
     hours, cap = knobs(store)
     items = [i for i in items if not _aged_out(i, now, hours)]
-    items = [i for i in _apply_states(items, states, now, keep_surfaced) if not i.get('ranked_wait')]
+    from .processing_unread import return_minutes
+    quiet = return_minutes(store)
+    items = [i for i in _apply_states(items, states, now, keep_surfaced, quiet) if not i.get('ranked_wait')]
     # The wrap-up is merged HERE, once the pile is what the owner has left: a task whose message they
     # have already read (or that triage filed as fyi - "Thank you!") is a task nobody closed, and the
     # wrap-up is the one thing still on them. Merged before the read, the row they had just cleared
     # suppressed it and the task fell out of the pipe altogether (2026-09-03).
-    wrapped = _apply_states(from_wrapped(store, now, busy), states, now, keep_surfaced)
+    wrapped = _apply_states(from_wrapped(store, now, busy), states, now, keep_surfaced, quiet)
     wrap_tids = {w['tid'] for w in wrapped}
     # ...and it outranks a row that is on the rail for its open task alone (from_feed open_only): an
     # open task whose reply already went out is better told as "the reply went out - the task is
@@ -1092,7 +1147,8 @@ def pile(store, force: bool = False, quiet: bool = False, observed=_OBSERVE) -> 
         shared = getattr(store, 'processing_reads_active', lambda: False)()
         full = build(store, keep_surfaced=True) if shared else None
         if shared:
-            items = [i for i in full['items'] if i['unread']]
+            from .processing_unread import on_rail
+            items = [i for i in full['items'] if on_rail(i)]
             p = {**full, 'items': items, 'lanes': [{**l, 'n': sum(i['lane'] == l['lane'] for i in items)} for l in full['lanes']],
                  'counts': {**full['counts'], 'unread': len(items), 'actionable': sum(i['actionable'] for i in items)}}
         else: p = build(store)
@@ -1329,7 +1385,7 @@ def next_item(store, key: str = None, only: str = None, include_surfaced: bool =
         return capture_selection(store, only=only, exclude=exclude).selected
     from .processing_unread import return_minutes        # the same hour the canonical pile's mark holds
     again = (datetime.now() - timedelta(minutes=return_minutes(store))).strftime('%Y-%m-%d %H:%M:%S')
-    ready = [i for i in pile(store, force=True)['items'] if not i.get('settling') and i['lane'] != 'working'
+    ready = [i for i in pile(store, force=True)['items'] if not i.get('settling') and i['lane'] != 'working' and not i.get('deferred')
              and not _not_yet(i) and i.get('key') != exclude
              and (include_surfaced or not i.get('surfaced')
                   or (i['lane'] in ('blocked', 'approve') and _ts(i.get('surfaced_at')) <= again))]
